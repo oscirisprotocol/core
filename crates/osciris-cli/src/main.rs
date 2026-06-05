@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use alloy::signers::local::PrivateKeySigner;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -38,6 +39,8 @@ use osciris_node::status::{
 use osciris_node::store::ProtocolStore;
 use osciris_node::{run_job, ProviderConfig};
 use osciris_verifier::{verify_bundle, verify_bundle_with_chain, VerifierConfig};
+use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::Serialize;
 use tar::Builder;
 use tracing_subscriber::EnvFilter;
@@ -61,6 +64,10 @@ enum Commands {
     Demo {
         #[command(subcommand)]
         command: DemoCommands,
+    },
+    Identity {
+        #[command(subcommand)]
+        command: IdentityCommands,
     },
     SubmitJob {
         #[arg(long, default_value = "enterprise_synthetic")]
@@ -221,6 +228,26 @@ enum DemoCommands {
         repo_root: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         keep_artifacts: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IdentityCommands {
+    Generate {
+        #[arg(long)]
+        node_id: String,
+        #[arg(long)]
+        role: String,
+        #[arg(long)]
+        display_name: String,
+        #[arg(long)]
+        work_root: Option<PathBuf>,
+        #[arg(long)]
+        evm_private_key_hex: Option<String>,
+        #[arg(long = "bootstrap-peer")]
+        bootstrap_peers: Vec<String>,
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -559,6 +586,21 @@ struct LocalSettlementDemoSummary {
     files: serde_json::Value,
 }
 
+#[derive(Debug, Serialize)]
+struct GeneratedIdentity {
+    node_id: String,
+    role: NodeRole,
+    display_name: String,
+    signing_key_seed_base64: String,
+    ed25519_public_key_base64: String,
+    peer_id: String,
+    evm_address: Option<String>,
+    evm_private_key_hex: Option<String>,
+    bootstrap_peers: Vec<String>,
+    node_identity: NodeIdentity,
+    suggested_commands: serde_json::Value,
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
@@ -591,6 +633,30 @@ fn main() -> Result<()> {
                 if !summary.ready {
                     std::process::exit(1);
                 }
+            }
+        },
+        Commands::Identity { command } => match command {
+            IdentityCommands::Generate {
+                node_id,
+                role,
+                display_name,
+                work_root,
+                evm_private_key_hex,
+                bootstrap_peers,
+                output,
+            } => {
+                let generated = runtime.block_on(generate_identity(
+                    node_id,
+                    role,
+                    display_name,
+                    work_root,
+                    evm_private_key_hex,
+                    bootstrap_peers,
+                ))?;
+                if let Some(output) = output {
+                    fs::write(&output, serde_json::to_vec_pretty(&generated)?)?;
+                }
+                print_json(&generated)?;
             }
         },
         Commands::SubmitJob {
@@ -2010,6 +2076,68 @@ async fn run_local_settlement_demo(
     Ok(summary)
 }
 
+async fn generate_identity(
+    node_id: String,
+    role: String,
+    display_name: String,
+    work_root: Option<PathBuf>,
+    evm_private_key_hex: Option<String>,
+    bootstrap_peers: Vec<String>,
+) -> Result<GeneratedIdentity> {
+    let role = parse_node_role(&role)?;
+    let mut seed_bytes = [0_u8; 32];
+    OsRng.fill_bytes(&mut seed_bytes);
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
+    let signing_key_seed_base64 = BASE64.encode(signing_key.to_bytes());
+    let ed25519_public_key_base64 = verifying_key_to_base64(&signing_key.verifying_key());
+    let peer_id = peer_id_from_signing_seed(&signing_key_seed_base64)?;
+
+    let (evm_address, evm_private_key_hex) = if let Some(private_key_hex) = evm_private_key_hex {
+        let signer = private_key_signer_from_hex(&private_key_hex)?;
+        (
+            Some(format!("{:#x}", signer.address())),
+            Some(format_private_key_hex(&private_key_hex)),
+        )
+    } else {
+        (None, None)
+    };
+
+    let node_identity = NodeIdentity {
+        node_id: node_id.clone(),
+        role: role.clone(),
+        ed25519_public_key_base64: ed25519_public_key_base64.clone(),
+        evm_address: evm_address.clone(),
+        display_name: display_name.clone(),
+        bootstrap_peers: bootstrap_peers.clone(),
+        created_at: Utc::now().to_rfc3339(),
+    };
+
+    if let Some(work_root) = work_root.as_ref() {
+        let store = ProtocolStore::open(&work_root.join(".osciris")).await?;
+        store.record_node_identity(&node_identity).await?;
+    }
+
+    Ok(GeneratedIdentity {
+        node_id: node_id.clone(),
+        role,
+        display_name,
+        signing_key_seed_base64: signing_key_seed_base64.clone(),
+        ed25519_public_key_base64,
+        peer_id,
+        evm_address,
+        evm_private_key_hex,
+        bootstrap_peers,
+        node_identity,
+        suggested_commands: serde_json::json!({
+            "status": "osciris-node node status --work-root /path/to/work-root",
+            "serve": format!(
+                "osciris-node network serve --work-root /path/to/work-root --signing-key-seed-base64 '{}' --listen-addr /ip4/0.0.0.0/tcp/4101",
+                signing_key_seed_base64
+            )
+        }),
+    })
+}
+
 fn inspect_command(name: &str, version_args: &[&str]) -> CommandAvailability {
     let path = std::env::var_os("PATH")
         .and_then(|_| std::process::Command::new("which").arg(name).output().ok())
@@ -2067,6 +2195,21 @@ fn run_dsp_doctor(repo_root: &Path) -> Result<DspDoctorStatus> {
 
 fn seed_base64(byte: u8) -> String {
     BASE64.encode([byte; 32])
+}
+
+fn private_key_signer_from_hex(raw: &str) -> Result<PrivateKeySigner> {
+    let normalized = format_private_key_hex(raw);
+    normalized
+        .parse::<PrivateKeySigner>()
+        .context("invalid evm_private_key_hex")
+}
+
+fn format_private_key_hex(raw: &str) -> String {
+    if raw.starts_with("0x") {
+        raw.to_string()
+    } else {
+        format!("0x{raw}")
+    }
 }
 
 fn mock_demo_job(job_id: Uuid) -> JobSpec {
@@ -2626,6 +2769,33 @@ mod tests {
         assert!(summary.provider_a_executed);
         assert!(!summary.provider_b_executed);
         assert!(summary.settlement_ready);
+        std::fs::remove_dir_all(work_root).unwrap();
+    }
+
+    #[test]
+    fn identity_generate_persists_node_identity() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let work_root = temp_work_root("osciris-identity-generate");
+        let generated = runtime
+            .block_on(generate_identity(
+                "provider-a".to_string(),
+                "provider".to_string(),
+                "Provider A".to_string(),
+                Some(work_root.clone()),
+                None,
+                vec!["/ip4/127.0.0.1/tcp/4101".to_string()],
+            ))
+            .unwrap();
+
+        assert_eq!(generated.node_id, "provider-a");
+        assert!(!generated.signing_key_seed_base64.is_empty());
+        assert!(!generated.peer_id.is_empty());
+
+        let store = runtime
+            .block_on(ProtocolStore::open(&work_root.join(".osciris")))
+            .unwrap();
+        let stored = runtime.block_on(store.load_node_identity()).unwrap();
+        assert_eq!(stored, Some(generated.node_identity.clone()));
         std::fs::remove_dir_all(work_root).unwrap();
     }
 }

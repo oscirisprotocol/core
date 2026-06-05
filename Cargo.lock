@@ -4067,6 +4067,7 @@ dependencies = [
  "osciris-core",
  "osciris-node",
  "osciris-verifier",
+ "rand 0.8.6",
  "serde",
  "serde_json",
  "tar",

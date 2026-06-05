@@ -86,6 +86,21 @@ Use a fixed work root if you want deterministic output paths:
 osciris-node demo local-settlement --work-root /tmp/osciris-demo
 ```
 
+## Multi-Host Join Guide
+
+For separate enterprise, provider, and verifier machines, use
+[docs/multi_host_testnet_join_guide.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/protocol-rs/docs/multi_host_testnet_join_guide.md).
+
+The CLI now includes contributor identity generation:
+
+```bash
+osciris-node identity generate \
+  --node-id provider-a \
+  --role provider \
+  --display-name "Provider A" \
+  --work-root /tmp/osciris-provider-a
+```
+
 ## Main Commands
 
 - `osciris-node doctor`
