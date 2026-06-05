@@ -2,30 +2,34 @@
 
 `protocol-rs` is the public developer entrypoint for OSCIRIS.
 
-OSCIRIS is a privacy-first decentralized AI training protocol. This Rust workspace
-contains the protocol runtime, the local node CLI, receipt verification, and the
-Horizen testnet chain client used to anchor accepted receipt bundles.
+OSCIRIS is a privacy-first decentralized AI training protocol. This workspace
+contains the Rust node CLI, off-chain protocol runtime, verifier path, and
+Horizen testnet chain client.
 
-This repo is for early developer MVP and testnet collaboration. It proves the
-off-chain workflow and testnet settlement path. It does not claim mainnet
-readiness, audited privacy, or public network bootstrap stability yet.
+## Current Progress
 
-## Repo Map
+- Early developer MVP is published.
+- Contributors can install `osciris-node`, generate identities, run the local
+  settlement demo, and follow the multi-host testnet join guide.
+- The current protocol slice supports signed claims, enterprise assignment,
+  provider execution receipts, verifier receipts, quorum, challenge gating, and
+  settlement-ready local state.
 
-- `protocol-rs`: Rust protocol runtime and public CLI
-- `../`: DSP Python execution and benchmarking engine
-- `../contracts`: Solidity contracts and Foundry tests for Horizen testnet
+## Latest Metrics
 
-## Prerequisites
+Primary bounded evidence: `osciris-enterprise-eff-20260603-1920`
 
-- Rust toolchain with `cargo`
-- `python3` for the local mock settlement demo and Python-backed workloads
-- `uv` to invoke the DSP repo from protocol workflows
-- `forge` if you want to run or modify the Solidity contracts
+- `Qwen/Qwen2.5-7B-Instruct` mean cost-to-quality savings: `16.08%`
+- `mistralai/Mistral-7B-v0.1` mean cost-to-quality savings: `12.55%`
+- completed benchmark rows: `6/6`
+
+Latest protocol proof shape:
+
+- multi-host off-chain workflow across enterprise, provider, and verifier roles
+- accepted local settlement demo ending in `settlement_ready`
+- Horizen testnet contract package published separately in `contracts`
 
 ## Install
-
-From the `protocol-rs` repo root:
 
 ```bash
 cargo install --path crates/osciris-cli
@@ -33,65 +37,15 @@ cargo install --path crates/osciris-cli
 
 This installs the public binary as `osciris-node`.
 
-## Smoke Test
+## Quick Start
 
 ```bash
 osciris-node --version
-osciris-node doctor
-```
-
-Optional DSP bridge check:
-
-```bash
 osciris-node doctor --repo-root /absolute/path/to/OSCIRIS
-```
-
-`doctor` is protocol-first. It checks CLI/runtime readiness and reports optional
-tooling such as `uv`, `python3`, `forge`, and DSP health when a valid DSP repo is
-supplied.
-
-## One-Command Local Demo
-
-Run the off-chain settlement lifecycle locally:
-
-```bash
 osciris-node demo local-settlement
 ```
 
-The demo:
-
-- creates an isolated local work root
-- creates one enterprise job
-- records two provider claims
-- assigns provider A
-- runs one mocked provider execution
-- creates receipt availability
-- verifies the receipt bundle
-- accepts quorum
-- opens a challenge
-- resolves the challenge rejected
-- finishes in `settlement_ready`
-
-Inspect the printed `work_root` after the run. The demo writes:
-
-- `job_status.json`
-- `provider_status.json`
-- `quorum_status.json`
-- `settlement_status.json`
-- signed job, claim, assignment, and challenge artifacts
-
-Use a fixed work root if you want deterministic output paths:
-
-```bash
-osciris-node demo local-settlement --work-root /tmp/osciris-demo
-```
-
-## Multi-Host Join Guide
-
-For separate enterprise, provider, and verifier machines, use
-[docs/multi_host_testnet_join_guide.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/protocol-rs/docs/multi_host_testnet_join_guide.md).
-
-The CLI now includes contributor identity generation:
+Generate a contributor identity:
 
 ```bash
 osciris-node identity generate \
@@ -101,51 +55,20 @@ osciris-node identity generate \
   --work-root /tmp/osciris-provider-a
 ```
 
-## Main Commands
+Multi-machine onboarding:
 
-- `osciris-node doctor`
-- `osciris-node demo local-settlement`
-- `osciris-node network serve`
-- `osciris-node network run-provider`
-- `osciris-node network run-verifier`
-- `osciris-node network assign-job`
-- `osciris-node network job-status`
-- `osciris-node watch-chain`
-
-## Development Checks
-
-```bash
-cargo fmt --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-```
+[docs/multi_host_testnet_join_guide.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/protocol-rs/docs/multi_host_testnet_join_guide.md)
 
 ## Related Repos
 
 - DSP engine and benchmarks: [../README.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/README.md)
-- Contracts and testnet deployment assets: [../contracts/README.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/contracts/README.md)
+- Horizen testnet contracts: [../contracts/README.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/contracts/README.md)
 
 ## Current Boundary
 
-The current developer MVP supports:
+This repo does not claim:
 
-- signed provider claims and enterprise assignment
-- provider execution receipts
-- verifier receipts and quorum
-- challenge gating
-- settlement-ready off-chain lifecycle
-- Horizen testnet contract/client integration
-
-It does not yet provide:
-
-- public mainnet bootstrap
-- trustless hardware attestation
+- mainnet readiness
 - audited privacy guarantees
-- production-grade permissioning or economic policy
-
-## Contribution Entry Points
-
-- `crates/osciris-cli`: public developer commands and demos
-- `crates/osciris-node`: execution/runtime and local protocol state
-- `crates/osciris-verifier`: receipt verification logic
-- `crates/osciris-chain`: Horizen testnet interaction
+- public permissionless bootstrap
+- trustless hardware attestation
