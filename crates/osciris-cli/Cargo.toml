@@ -5,13 +5,16 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+alloy.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
 flate2.workspace = true
+osciris-chain = { path = "../osciris-chain" }
 osciris-core = { path = "../osciris-core" }
 osciris-node = { path = "../osciris-node" }
 osciris-verifier = { path = "../osciris-verifier" }
+serde.workspace = true
 serde_json.workspace = true
 tar.workspace = true
 tokio.workspace = true

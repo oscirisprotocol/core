@@ -15,6 +15,8 @@ use tracing::info;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+pub mod network;
+pub mod status;
 pub mod store;
 
 use store::ProtocolStore;
@@ -179,14 +181,60 @@ pub async fn run_job(job_spec: &JobSpec, provider: &ProviderConfig) -> Result<Ru
 fn build_command_argv(job_spec: &JobSpec, python_output_dir: &Path) -> Result<Vec<String>> {
     let mut argv = shell_words::split(&job_spec.command)
         .with_context(|| format!("failed to parse command string {:?}", job_spec.command))?;
-    argv.extend(job_spec.args.iter().cloned());
-
-    if !argv.iter().any(|arg| arg == "--output-dir") {
-        argv.push("--output-dir".to_string());
-        argv.push(python_output_dir.display().to_string());
-    }
+    merge_structured_job_args(&mut argv, job_spec);
+    ensure_option_value(
+        &mut argv,
+        "--output-dir",
+        python_output_dir.display().to_string(),
+    );
 
     Ok(argv)
+}
+
+fn merge_structured_job_args(argv: &mut Vec<String>, job_spec: &JobSpec) {
+    let mut index = 0usize;
+    while index < job_spec.args.len() {
+        let arg = &job_spec.args[index];
+        if arg.starts_with("--") {
+            let next = job_spec.args.get(index + 1);
+            if let Some(value) = next {
+                ensure_option_value(argv, arg, value.clone());
+                index += 2;
+                continue;
+            }
+            ensure_flag(argv, arg);
+            index += 1;
+            continue;
+        }
+
+        if !argv.contains(arg) {
+            argv.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    if let Some(model_id) = &job_spec.model_id {
+        ensure_option_value(argv, "--model-id", model_id.clone());
+    }
+}
+
+fn ensure_option_value(argv: &mut Vec<String>, flag: &str, value: String) {
+    if has_flag(argv, flag) {
+        return;
+    }
+
+    argv.push(flag.to_string());
+    argv.push(value);
+}
+
+fn ensure_flag(argv: &mut Vec<String>, flag: &str) {
+    if !has_flag(argv, flag) {
+        argv.push(flag.to_string());
+    }
+}
+
+fn has_flag(argv: &[String], flag: &str) -> bool {
+    argv.iter().any(|arg| arg == flag)
 }
 
 fn expected_metrics_path(job_type: JobType, output_dir: &Path) -> PathBuf {
@@ -235,6 +283,9 @@ fn gpu_metadata_from_environment() -> GpuMetadata {
         cuda_available: std::env::var("OSCIRIS_CUDA_AVAILABLE")
             .map(|raw| matches!(raw.as_str(), "1" | "true" | "TRUE"))
             .unwrap_or(false),
+        vram_gb: std::env::var("OSCIRIS_GPU_VRAM_GB")
+            .ok()
+            .and_then(|raw| raw.parse::<f64>().ok()),
     }
 }
 
@@ -284,19 +335,7 @@ mod tests {
             repo_root: temp.path().to_path_buf(),
             work_root: temp.path().to_path_buf(),
         };
-        let script = r#"
-import json, pathlib, sys
-output_dir = pathlib.Path(sys.argv[sys.argv.index("--output-dir") + 1])
-output_dir.mkdir(parents=True, exist_ok=True)
-(output_dir / "llm_lora_economics.json").write_text(json.dumps({
-  "kind": "llm_lora_economics_benchmark",
-  "config": {"model_id": "mock-model"},
-  "aggregate": {"quality_retention": 1.0},
-  "runs": [{"mode": "raw_lora"}, {"mode": "dsp_prepared_lora"}]
-}, indent=2), encoding="utf-8")
-(output_dir / "llm_lora_economics.csv").write_text("mode,quality\nraw,1.0\n", encoding="utf-8")
-print("mock benchmark complete")
-"#;
+        let script = r#"import json, pathlib, sys; output_dir = pathlib.Path(sys.argv[sys.argv.index("--output-dir") + 1]); output_dir.mkdir(parents=True, exist_ok=True); (output_dir / "llm_lora_economics.json").write_text(json.dumps({"kind": "llm_lora_economics_benchmark", "config": {"model_id": "mock-model"}, "aggregate": {"quality_retention": 1.0}, "runs": [{"mode": "raw_lora"}, {"mode": "dsp_prepared_lora"}]}, indent=2), encoding="utf-8"); (output_dir / "llm_lora_economics.csv").write_text("mode,quality\nraw,1.0\n", encoding="utf-8"); print("mock benchmark complete")"#;
         let job = sample_job("python3", vec!["-c".to_string(), script.to_string()]);
 
         let output = run_job(&job, &provider).await.unwrap();
@@ -310,5 +349,62 @@ print("mock benchmark complete")
         let jobs = store.list_jobs().await.unwrap();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].status, "completed");
+    }
+
+    #[test]
+    fn build_command_argv_preserves_explicit_command_overrides() {
+        let job = sample_job(
+            "uv run osciris llm-lora-economics --model-id Qwen/Qwen2.5-0.5B-Instruct --samples 6 --eval-samples 2 --max-steps 1",
+            vec![
+                "--samples".to_string(),
+                "24".to_string(),
+                "--eval-samples".to_string(),
+                "8".to_string(),
+                "--seed".to_string(),
+                "11".to_string(),
+                "--max-steps".to_string(),
+                "20".to_string(),
+            ],
+        );
+
+        let argv = build_command_argv(&job, Path::new("/tmp/output")).unwrap();
+        let rendered = argv.join(" ");
+
+        assert!(rendered.contains("--model-id Qwen/Qwen2.5-0.5B-Instruct"));
+        assert!(rendered.contains("--samples 6"));
+        assert!(rendered.contains("--eval-samples 2"));
+        assert!(rendered.contains("--max-steps 1"));
+        assert!(rendered.contains("--seed 11"));
+        assert!(rendered.contains("--output-dir /tmp/output"));
+        assert_eq!(
+            argv.iter()
+                .filter(|arg| arg.as_str() == "--samples")
+                .count(),
+            1
+        );
+        assert_eq!(
+            argv.iter()
+                .filter(|arg| arg.as_str() == "--eval-samples")
+                .count(),
+            1
+        );
+        assert_eq!(
+            argv.iter()
+                .filter(|arg| arg.as_str() == "--max-steps")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn build_command_argv_adds_model_id_when_command_omits_it() {
+        let mut job = sample_job("uv run osciris llm-lora-economics", vec![]);
+        job.model_id = Some("Qwen/Qwen2.5-7B-Instruct".to_string());
+
+        let argv = build_command_argv(&job, Path::new("/tmp/output")).unwrap();
+        let rendered = argv.join(" ");
+
+        assert!(rendered.contains("--model-id Qwen/Qwen2.5-7B-Instruct"));
+        assert!(rendered.contains("--output-dir /tmp/output"));
     }
 }

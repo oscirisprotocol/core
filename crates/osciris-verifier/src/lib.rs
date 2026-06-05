@@ -1,11 +1,15 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use chrono::Utc;
+use osciris_chain::{provider_address_from_id, verifier_address_from_id, OscirisChain};
 use osciris_core::{
     bundle_hash, canonical_json_sha256, load_signing_key_from_base64_seed, sha256_file,
-    sign_verification_receipt, verify_execution_receipt_signature, verifying_key_from_base64,
-    BundleIndex, ExecutionReceipt, JobType, ReceiptBundle, VerificationChecks, VerificationReceipt,
+    sign_verification_receipt, verify_execution_receipt_signature,
+    verify_provider_capability_signature, verifying_key_from_base64, BundleIndex, ExecutionReceipt,
+    JobType, ProviderCapability, ReceiptBundle, VerificationChecks, VerificationReceipt,
     VerificationStatus,
 };
 use osciris_node::store::ProtocolStore;
@@ -25,7 +29,36 @@ pub struct VerifyOutput {
     pub receipt_bundle_path: PathBuf,
 }
 
+pub async fn verify_bundle_with_chain(
+    evidence_dir: &Path,
+    chain: &OscirisChain,
+    config: &VerifierConfig,
+) -> Result<VerifyOutput> {
+    let execution_receipt_path = evidence_dir.join("execution_receipt.json");
+    let receipt: ExecutionReceipt =
+        serde_json::from_slice(&fs::read(&execution_receipt_path).await?)?;
+    let provider_address = provider_address_from_id(&receipt.provider_id)?;
+    let identity = chain.fetch_provider_identity(provider_address).await?;
+    let provider_public_key_base64 = BASE64.encode(identity.ed25519_public_key.as_slice());
+    chain
+        .assert_registered_provider_key(provider_address, &provider_public_key_base64)
+        .await?;
+    let verifier_address = verifier_address_from_id(&config.verifier_id)?;
+    chain
+        .assert_registered_verifier_seed(verifier_address, &config.signing_key_seed_base64)
+        .await?;
+    verify_bundle_internal(evidence_dir, &provider_public_key_base64, config).await
+}
+
 pub async fn verify_bundle(
+    evidence_dir: &Path,
+    provider_public_key_base64: &str,
+    config: &VerifierConfig,
+) -> Result<VerifyOutput> {
+    verify_bundle_internal(evidence_dir, provider_public_key_base64, config).await
+}
+
+async fn verify_bundle_internal(
     evidence_dir: &Path,
     provider_public_key_base64: &str,
     config: &VerifierConfig,
@@ -45,6 +78,8 @@ pub async fn verify_bundle(
     let artifact_root_valid =
         canonical_json_sha256(&receipt.artifact_manifests)? == receipt.artifact_root_sha256;
     let required_metrics_present = verify_metrics(evidence_dir, &receipt).await?;
+    let provider_capability = store.load_provider_capability(&receipt.provider_id).await?;
+    let hardware_claim_valid = verify_hardware_claim(provider_capability.as_ref(), &receipt);
 
     let checks = VerificationChecks {
         manifest_valid,
@@ -53,6 +88,7 @@ pub async fn verify_bundle(
         artifact_root_valid,
         required_metrics_present,
         signature_valid,
+        hardware_claim_valid,
     };
     let failure_reasons = collect_failure_reasons(&checks);
     let verification_status = if failure_reasons.is_empty() {
@@ -203,15 +239,67 @@ fn collect_failure_reasons(checks: &VerificationChecks) -> Vec<String> {
     if !checks.signature_valid {
         reasons.push("invalid_provider_signature".to_string());
     }
+    if !checks.hardware_claim_valid {
+        reasons.push("invalid_hardware_claim".to_string());
+    }
     reasons
+}
+
+fn verify_hardware_claim(
+    capability: Option<&ProviderCapability>,
+    receipt: &ExecutionReceipt,
+) -> bool {
+    let Some(capability) = capability else {
+        return false;
+    };
+
+    let Ok(capability_key) = verifying_key_from_base64(&capability.ed25519_public_key_base64)
+    else {
+        return false;
+    };
+    if verify_provider_capability_signature(capability, &capability_key).is_err() {
+        return false;
+    }
+
+    if capability.node_id != receipt.provider_id {
+        return false;
+    }
+
+    if capability.cuda_available != receipt.gpu_metadata.cuda_available {
+        return false;
+    }
+
+    if capability.gpu_count > 0 {
+        if receipt.gpu_metadata.gpu_model.trim().is_empty() {
+            return false;
+        }
+        let observed_model = receipt.gpu_metadata.gpu_model.to_ascii_lowercase();
+        if observed_model == "unknown" || observed_model == "mock" {
+            return false;
+        }
+        if capability.cuda_available && !receipt.gpu_metadata.cuda_available {
+            return false;
+        }
+    }
+
+    if let Some(observed_vram_gb) = receipt.gpu_metadata.vram_gb {
+        if observed_vram_gb + f64::EPSILON < capability.vram_gb {
+            return false;
+        }
+    } else if capability.gpu_count > 0 && capability.vram_gb > 0.0 {
+        return false;
+    }
+
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use osciris_core::{
-        load_signing_key_from_base64_seed, verifying_key_to_base64, JobSpec, JobType, PrivacyMode,
-        PrivacyPolicy,
+        load_signing_key_from_base64_seed, sign_provider_capability, verifying_key_to_base64,
+        ExecutionStatus, GpuMetadata, JobSpec, JobType, NodeStatus, PrivacyMode, PrivacyPolicy,
+        ProviderCapability,
     };
     use osciris_node::{run_job, ProviderConfig};
     use uuid::Uuid;
@@ -250,19 +338,39 @@ mod tests {
             repo_root: temp.path().to_path_buf(),
             work_root: temp.path().to_path_buf(),
         };
-        let script = r#"
-import json, pathlib, sys
-output_dir = pathlib.Path(sys.argv[sys.argv.index("--output-dir") + 1])
-output_dir.mkdir(parents=True, exist_ok=True)
-(output_dir / "llm_lora_economics.json").write_text(json.dumps({
-  "kind": "llm_lora_economics_benchmark",
-  "config": {"model_id": "mock-model"},
-  "aggregate": {"quality_retention": 1.0},
-  "runs": [{"mode": "raw_lora"}, {"mode": "dsp_prepared_lora"}]
-}, indent=2), encoding="utf-8")
-"#;
+        let script = r#"import json, pathlib, sys; output_dir = pathlib.Path(sys.argv[sys.argv.index("--output-dir") + 1]); output_dir.mkdir(parents=True, exist_ok=True); (output_dir / "llm_lora_economics.json").write_text(json.dumps({"kind": "llm_lora_economics_benchmark", "config": {"model_id": "mock-model"}, "aggregate": {"quality_retention": 1.0}, "runs": [{"mode": "raw_lora"}, {"mode": "dsp_prepared_lora"}]}, indent=2), encoding="utf-8")"#;
         let job = sample_job("python3", vec!["-c".to_string(), script.to_string()]);
         let run = run_job(&job, &provider).await.unwrap();
+        let store = ProtocolStore::open(&temp.path().join(".osciris"))
+            .await
+            .unwrap();
+        let provider_signing_key = load_signing_key_from_base64_seed(&provider_seed).unwrap();
+        let mut provider_capability = ProviderCapability {
+            node_id: provider.provider_id.clone(),
+            ed25519_public_key_base64: verifying_key_to_base64(
+                &provider_signing_key.verifying_key(),
+            ),
+            host_class: "local-mock".to_string(),
+            gpu_model: "none".to_string(),
+            gpu_count: 0,
+            vram_gb: 0.0,
+            cuda_available: false,
+            mps_available: false,
+            supported_job_types: vec![JobType::LlmLoraEconomics],
+            supported_runtimes: vec!["python".to_string()],
+            pricing_hint: Some("local test".to_string()),
+            current_load: 0.0,
+            active_job_count: 0,
+            status: NodeStatus::OnlineIdle,
+            updated_at: "2026-06-05T00:00:00Z".to_string(),
+            signature: String::new(),
+        };
+        provider_capability.signature =
+            sign_provider_capability(&provider_capability, &provider_signing_key).unwrap();
+        store
+            .record_provider_capability(&provider_capability)
+            .await
+            .unwrap();
 
         let verifier = VerifierConfig {
             verifier_id: "verifier-1".to_string(),
@@ -281,9 +389,6 @@ output_dir.mkdir(parents=True, exist_ok=True)
         .unwrap();
         assert!(output.verification_receipt_path.exists());
 
-        let store = ProtocolStore::open(&temp.path().join(".osciris"))
-            .await
-            .unwrap();
         assert_eq!(
             store
                 .verification_receipt_count(&job.job_id.to_string())
@@ -306,5 +411,86 @@ output_dir.mkdir(parents=True, exist_ok=True)
                 .unwrap(),
             1
         );
+    }
+
+    fn hardware_receipt(provider_id: &str, gpu_metadata: GpuMetadata) -> ExecutionReceipt {
+        ExecutionReceipt {
+            receipt_id: Uuid::now_v7(),
+            job_id: Uuid::now_v7(),
+            provider_id: provider_id.to_string(),
+            job_type: JobType::LlmLoraEconomics,
+            status: ExecutionStatus::Completed,
+            command_exit_code: 0,
+            started_at: "2026-06-05T00:00:00Z".to_string(),
+            finished_at: "2026-06-05T00:01:00Z".to_string(),
+            wall_clock_seconds: 60.0,
+            stdout_sha256: "stdout".to_string(),
+            stderr_sha256: "stderr".to_string(),
+            artifact_root_sha256: "artifact".to_string(),
+            artifact_manifests: vec![],
+            metrics_path: "llm_lora_economics.json".to_string(),
+            gpu_metadata,
+            signature: "signature".to_string(),
+            signing_key_id: "provider-key".to_string(),
+        }
+    }
+
+    fn hardware_capability(provider_id: &str) -> ProviderCapability {
+        let signing_key =
+            load_signing_key_from_base64_seed("CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=")
+                .unwrap();
+        let mut capability = ProviderCapability {
+            node_id: provider_id.to_string(),
+            ed25519_public_key_base64: verifying_key_to_base64(&signing_key.verifying_key()),
+            host_class: "aws-g5".to_string(),
+            gpu_model: "NVIDIA A10G".to_string(),
+            gpu_count: 1,
+            vram_gb: 24.0,
+            cuda_available: true,
+            mps_available: false,
+            supported_job_types: vec![JobType::LlmLoraEconomics],
+            supported_runtimes: vec!["python".to_string(), "cuda".to_string()],
+            pricing_hint: Some("g5.xlarge".to_string()),
+            current_load: 0.0,
+            active_job_count: 0,
+            status: NodeStatus::OnlineIdle,
+            updated_at: "2026-06-05T00:00:00Z".to_string(),
+            signature: String::new(),
+        };
+        capability.signature = sign_provider_capability(&capability, &signing_key).unwrap();
+        capability
+    }
+
+    #[test]
+    fn hardware_claim_accepts_matching_gpu_metadata() {
+        let capability = hardware_capability("provider-a");
+        let receipt = hardware_receipt(
+            "provider-a",
+            GpuMetadata {
+                gpu_model: "NVIDIA A10G".to_string(),
+                driver: "570.86".to_string(),
+                cuda_available: true,
+                vram_gb: Some(24.0),
+            },
+        );
+
+        assert!(verify_hardware_claim(Some(&capability), &receipt));
+    }
+
+    #[test]
+    fn hardware_claim_rejects_mock_or_missing_gpu_metadata() {
+        let capability = hardware_capability("provider-a");
+        let receipt = hardware_receipt(
+            "provider-a",
+            GpuMetadata {
+                gpu_model: "mock".to_string(),
+                driver: "mock".to_string(),
+                cuda_available: false,
+                vram_gb: None,
+            },
+        );
+
+        assert!(!verify_hardware_claim(Some(&capability), &receipt));
+        assert!(!verify_hardware_claim(None, &receipt));
     }
 }

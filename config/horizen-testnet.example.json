@@ -1,0 +1,10 @@
+{
+  "rpc_url": "https://horizen-testnet.rpc.caldera.xyz/http",
+  "chain_id": 2651420,
+  "provider_registry": "0x0000000000000000000000000000000000000000",
+  "job_escrow": "0x0000000000000000000000000000000000000000",
+  "receipt_registry": "0x0000000000000000000000000000000000000000",
+  "explorer_url": "https://horizen-testnet.explorer.caldera.xyz",
+  "stake_token": "0x0000000000000000000000000000000000000000",
+  "payment_token": "0x0000000000000000000000000000000000000000"
+}
