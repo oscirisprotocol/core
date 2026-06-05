@@ -1,10 +1,13 @@
 use std::collections::BTreeSet;
+use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use flate2::write::GzEncoder;
@@ -15,12 +18,12 @@ use osciris_chain::{
 };
 use osciris_core::{
     bundle_hash, load_signing_key_from_base64_seed, sha256_file, sign_challenge_record,
-    sign_job_announcement, sign_job_assignment, sign_receipt_availability,
-    verify_challenge_record_signature, verify_job_claim_signature,
+    sign_job_announcement, sign_job_assignment, sign_job_claim, sign_provider_capability,
+    sign_receipt_availability, verify_challenge_record_signature, verify_job_claim_signature,
     verify_receipt_availability_signature, verify_verification_receipt_signature,
     verifying_key_from_base64, verifying_key_to_base64, ChainSubmissionStatus, ChallengeReasonCode,
     ChallengeRecord, ChallengeStatus, ExecutionReceipt, JobAnnouncement, JobAssignment, JobClaim,
-    JobSpec, JobType, NodeIdentity, NodeRole, PeerPresence, PrivacyMode, PrivacyPolicy,
+    JobSpec, JobType, NodeIdentity, NodeRole, NodeStatus, PeerPresence, PrivacyMode, PrivacyPolicy,
     ProviderCapability, ReceiptAvailability, ReceiptBundle, VerificationReceipt,
     VerificationReceiptAnnouncement,
 };
@@ -41,7 +44,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 #[derive(Debug, Parser)]
-#[command(name = "osciris-node")]
+#[command(name = "osciris-node", version, about = "OSCIRIS protocol node CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -49,6 +52,16 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    Doctor {
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+        #[arg(long)]
+        work_root: Option<PathBuf>,
+    },
+    Demo {
+        #[command(subcommand)]
+        command: DemoCommands,
+    },
     SubmitJob {
         #[arg(long, default_value = "enterprise_synthetic")]
         dataset: String,
@@ -196,6 +209,18 @@ enum Commands {
     Network {
         #[command(subcommand)]
         command: NetworkCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DemoCommands {
+    LocalSettlement {
+        #[arg(long)]
+        work_root: Option<PathBuf>,
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        keep_artifacts: bool,
     },
 }
 
@@ -485,6 +510,55 @@ enum NetworkCommands {
     },
 }
 
+#[derive(Debug, Serialize)]
+struct CommandAvailability {
+    available: bool,
+    path: Option<String>,
+    version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DspDoctorStatus {
+    invoked: bool,
+    ok: bool,
+    exit_code: Option<i32>,
+    output_json: Option<serde_json::Value>,
+    stderr: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorReport {
+    ready: bool,
+    cli_version: &'static str,
+    platform: String,
+    architecture: String,
+    work_root: String,
+    work_root_writable: bool,
+    protocol_store_ready: bool,
+    python3: CommandAvailability,
+    uv: CommandAvailability,
+    forge: CommandAvailability,
+    dsp_repo_root: Option<String>,
+    dsp_repo_valid: Option<bool>,
+    dsp_doctor: Option<DspDoctorStatus>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalSettlementDemoSummary {
+    ready: bool,
+    work_root: String,
+    repo_root: String,
+    kept_artifacts: bool,
+    job_id: Uuid,
+    provider_a_executed: bool,
+    provider_b_executed: bool,
+    quorum_status: String,
+    settlement_ready: bool,
+    lifecycle_state: String,
+    files: serde_json::Value,
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
@@ -492,6 +566,33 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let runtime = tokio::runtime::Runtime::new()?;
     match cli.command {
+        Commands::Doctor {
+            repo_root,
+            work_root,
+        } => {
+            let report = runtime.block_on(run_doctor(repo_root, work_root))?;
+            print_json(&report)?;
+            if !report.ready {
+                std::process::exit(1);
+            }
+        }
+        Commands::Demo { command } => match command {
+            DemoCommands::LocalSettlement {
+                work_root,
+                repo_root,
+                keep_artifacts,
+            } => {
+                let summary = runtime.block_on(run_local_settlement_demo(
+                    work_root,
+                    repo_root,
+                    keep_artifacts,
+                ))?;
+                print_json(&summary)?;
+                if !summary.ready {
+                    std::process::exit(1);
+                }
+            }
+        },
         Commands::SubmitJob {
             dataset,
             model_id,
@@ -1519,6 +1620,575 @@ async fn build_settlement_report(
     ))
 }
 
+async fn run_doctor(
+    repo_root: Option<PathBuf>,
+    work_root: Option<PathBuf>,
+) -> Result<DoctorReport> {
+    let work_root = work_root
+        .unwrap_or_else(|| env::temp_dir().join(format!("osciris-doctor-{}", Uuid::now_v7())));
+    fs::create_dir_all(&work_root)?;
+
+    let temp_probe_path = work_root.join(".doctor-write-test");
+    let work_root_writable = fs::write(&temp_probe_path, b"ok").is_ok();
+    if work_root_writable {
+        let _ = fs::remove_file(&temp_probe_path);
+    }
+
+    let protocol_store_ready = if work_root_writable {
+        ProtocolStore::open(&work_root.join(".osciris"))
+            .await
+            .is_ok()
+    } else {
+        false
+    };
+
+    let python3 = inspect_command("python3", &["--version"]);
+    let uv = inspect_command("uv", &["--version"]);
+    let forge = inspect_command("forge", &["--version"]);
+
+    let mut warnings = Vec::new();
+    if !python3.available {
+        warnings.push(
+            "python3 is not available; Python-backed provider execution and demos will not run"
+                .to_string(),
+        );
+    }
+    if !uv.available {
+        warnings.push(
+            "uv is not available; DSP repo commands cannot be invoked from this CLI".to_string(),
+        );
+    }
+    if !forge.available {
+        warnings.push(
+            "forge is not available; smart contract tests and deployments cannot be run locally"
+                .to_string(),
+        );
+    }
+
+    let dsp_repo_valid = repo_root.as_ref().map(|root| {
+        root.join("pyproject.toml").exists() && root.join("src/osciris/cli.py").exists()
+    });
+    if repo_root.is_some() && dsp_repo_valid == Some(false) {
+        warnings.push(
+            "repo_root does not look like the OSCIRIS DSP repository; skipping DSP health check"
+                .to_string(),
+        );
+    }
+
+    let dsp_doctor = if let (Some(root), Some(true)) = (repo_root.as_ref(), dsp_repo_valid) {
+        if uv.available {
+            Some(run_dsp_doctor(root)?)
+        } else {
+            Some(DspDoctorStatus {
+                invoked: false,
+                ok: false,
+                exit_code: None,
+                output_json: None,
+                stderr: Some("uv is unavailable".to_string()),
+            })
+        }
+    } else {
+        None
+    };
+
+    let ready = work_root_writable && protocol_store_ready;
+    Ok(DoctorReport {
+        ready,
+        cli_version: env!("CARGO_PKG_VERSION"),
+        platform: env::consts::OS.to_string(),
+        architecture: env::consts::ARCH.to_string(),
+        work_root: work_root.display().to_string(),
+        work_root_writable,
+        protocol_store_ready,
+        python3,
+        uv,
+        forge,
+        dsp_repo_root: repo_root.as_ref().map(|path| path.display().to_string()),
+        dsp_repo_valid,
+        dsp_doctor,
+        warnings,
+    })
+}
+
+async fn run_local_settlement_demo(
+    work_root: Option<PathBuf>,
+    repo_root: Option<PathBuf>,
+    keep_artifacts: bool,
+) -> Result<LocalSettlementDemoSummary> {
+    let work_root = work_root
+        .unwrap_or_else(|| env::temp_dir().join(format!("osciris-demo-{}", Uuid::now_v7())));
+    fs::create_dir_all(&work_root)?;
+    let repo_root = repo_root.unwrap_or_else(|| work_root.clone());
+    let protocol_root = work_root.join(".osciris");
+    let demo_root = work_root.join("demo");
+    fs::create_dir_all(&demo_root)?;
+    let store = ProtocolStore::open(&protocol_root).await?;
+
+    let enterprise_seed = seed_base64(1);
+    let provider_a_seed = seed_base64(2);
+    let provider_b_seed = seed_base64(3);
+    let verifier_seed = seed_base64(4);
+
+    let enterprise_signing_key = load_signing_key_from_base64_seed(&enterprise_seed)?;
+    let provider_a_signing_key = load_signing_key_from_base64_seed(&provider_a_seed)?;
+    let provider_b_signing_key = load_signing_key_from_base64_seed(&provider_b_seed)?;
+    let verifier_signing_key = load_signing_key_from_base64_seed(&verifier_seed)?;
+
+    let enterprise_public_key = verifying_key_to_base64(&enterprise_signing_key.verifying_key());
+    let provider_a_public_key = verifying_key_to_base64(&provider_a_signing_key.verifying_key());
+    let provider_b_public_key = verifying_key_to_base64(&provider_b_signing_key.verifying_key());
+
+    let provider_a_capability = signed_provider_capability(
+        "provider-a",
+        &provider_a_public_key,
+        &provider_a_signing_key,
+        "aws_g5_xlarge",
+    )?;
+    let provider_b_capability = signed_provider_capability(
+        "provider-b",
+        &provider_b_public_key,
+        &provider_b_signing_key,
+        "aws_g5_xlarge",
+    )?;
+    store
+        .record_provider_capability(&provider_a_capability)
+        .await?;
+    store
+        .record_provider_capability(&provider_b_capability)
+        .await?;
+    fs::write(
+        demo_root.join("provider_a_capability.json"),
+        serde_json::to_vec_pretty(&provider_a_capability)?,
+    )?;
+    fs::write(
+        demo_root.join("provider_b_capability.json"),
+        serde_json::to_vec_pretty(&provider_b_capability)?,
+    )?;
+
+    let job_id = Uuid::now_v7();
+    let job = mock_demo_job(job_id);
+    let job_spec_path = demo_root.join("job_spec.json");
+    fs::write(&job_spec_path, serde_json::to_vec_pretty(&job)?)?;
+
+    let mut announcement = JobAnnouncement {
+        job_id,
+        job_spec: job.clone(),
+        submitter_node_id: "enterprise-1".to_string(),
+        submitter_ed25519_public_key_base64: enterprise_public_key.clone(),
+        job_type: job.job_type.clone(),
+        privacy_mode: job.privacy_policy.privacy_mode.clone(),
+        required_capability: "gpu>=24gb".to_string(),
+        estimated_runtime_class: "short".to_string(),
+        payment_token: job.payment_token.clone(),
+        escrow_amount_atomic: job.escrow_amount_atomic.clone(),
+        required_verifier_count: job.required_verifier_count,
+        announced_at: Utc::now().to_rfc3339(),
+        signature: String::new(),
+    };
+    announcement.signature = sign_job_announcement(&announcement, &enterprise_signing_key)?;
+    store.record_job_announcement(&announcement).await?;
+    fs::write(
+        demo_root.join("job_announcement.json"),
+        serde_json::to_vec_pretty(&announcement)?,
+    )?;
+
+    let claim_a = signed_job_claim(
+        "provider-a",
+        &provider_a_public_key,
+        &provider_a_signing_key,
+        job_id,
+    )?;
+    let claim_b = signed_job_claim(
+        "provider-b",
+        &provider_b_public_key,
+        &provider_b_signing_key,
+        job_id,
+    )?;
+    store.record_job_claim(&claim_a).await?;
+    store.record_job_claim(&claim_b).await?;
+    fs::write(
+        demo_root.join("job_claim_provider_a.json"),
+        serde_json::to_vec_pretty(&claim_a)?,
+    )?;
+    fs::write(
+        demo_root.join("job_claim_provider_b.json"),
+        serde_json::to_vec_pretty(&claim_b)?,
+    )?;
+
+    let mut assignment = JobAssignment {
+        job_id,
+        assigned_provider_node_id: "provider-a".to_string(),
+        assigner_node_id: "enterprise-1".to_string(),
+        assigner_ed25519_public_key_base64: enterprise_public_key,
+        assignment_reason: "demo_preferred_provider".to_string(),
+        assigned_at: Utc::now().to_rfc3339(),
+        signature: String::new(),
+    };
+    assignment.signature = sign_job_assignment(&assignment, &enterprise_signing_key)?;
+    store.record_job_assignment(&assignment).await?;
+    fs::write(
+        demo_root.join("job_assignment.json"),
+        serde_json::to_vec_pretty(&assignment)?,
+    )?;
+
+    let gpu_env = ScopedGpuEnvironment::set("NVIDIA A10G", "550.54.15", true, Some(24.0));
+    let provider_a = ProviderConfig {
+        provider_id: "provider-a".to_string(),
+        signing_key_id: "provider-a-key".to_string(),
+        signing_key_seed_base64: provider_a_seed,
+        repo_root: repo_root.clone(),
+        work_root: work_root.clone(),
+    };
+    let output = run_job(&job, &provider_a).await?;
+    drop(gpu_env);
+
+    let mut availability = ReceiptAvailability {
+        job_id,
+        provider_node_id: "provider-a".to_string(),
+        provider_ed25519_public_key_base64: provider_a_public_key.clone(),
+        execution_receipt_sha256: sha256_file(&output.execution_receipt_path)?,
+        bundle_sha256: {
+            let bundle: ReceiptBundle =
+                serde_json::from_slice(&fs::read(&output.receipt_bundle_path)?)?;
+            bundle.bundle_sha256
+        },
+        bundle_uri: format!("file://{}", output.evidence_dir.display()),
+        announced_at: Utc::now().to_rfc3339(),
+        signature: String::new(),
+    };
+    availability.signature = sign_receipt_availability(&availability, &provider_a_signing_key)?;
+    store.record_receipt_availability(&availability).await?;
+    fs::write(
+        demo_root.join("receipt_availability.json"),
+        serde_json::to_vec_pretty(&availability)?,
+    )?;
+
+    let verifier = VerifierConfig {
+        verifier_id: "verifier-1".to_string(),
+        signing_key_id: "verifier-1-key".to_string(),
+        signing_key_seed_base64: verifier_seed,
+    };
+    let verification_output =
+        verify_bundle(&output.evidence_dir, &provider_a_public_key, &verifier).await?;
+    fs::copy(
+        &verification_output.verification_receipt_path,
+        demo_root.join("verification_receipt.json"),
+    )?;
+
+    let quorum_before_challenge = build_quorum_report(&store, job_id).await?;
+    fs::write(
+        demo_root.join("quorum_status.json"),
+        serde_json::to_vec_pretty(&quorum_before_challenge)?,
+    )?;
+
+    let mut challenge = ChallengeRecord {
+        challenge_id: Uuid::now_v7(),
+        job_id,
+        bundle_sha256: availability.bundle_sha256.clone(),
+        opened_by: "enterprise-1".to_string(),
+        opened_by_ed25519_public_key_base64: verifying_key_to_base64(
+            &enterprise_signing_key.verifying_key(),
+        ),
+        reason_code: ChallengeReasonCode::ForbiddenJobTransition,
+        reason_detail: "demo challenge gate".to_string(),
+        opened_at: Utc::now().to_rfc3339(),
+        status: ChallengeStatus::Open,
+        resolved_by: None,
+        resolved_by_ed25519_public_key_base64: None,
+        resolved_at: None,
+        resolution_note: None,
+        signature: String::new(),
+    };
+    challenge.signature = sign_challenge_record(&challenge, &enterprise_signing_key)?;
+    store.record_challenge_record(&challenge).await?;
+    fs::write(
+        demo_root.join("challenge_open.json"),
+        serde_json::to_vec_pretty(&challenge)?,
+    )?;
+
+    let settlement_blocked = build_settlement_report(&store, job_id).await?;
+    fs::write(
+        demo_root.join("settlement_status_blocked.json"),
+        serde_json::to_vec_pretty(&settlement_blocked)?,
+    )?;
+
+    challenge.status = ChallengeStatus::ResolvedRejected;
+    challenge.resolved_by = Some("verifier-1".to_string());
+    challenge.resolved_by_ed25519_public_key_base64 = Some(verifying_key_to_base64(
+        &verifier_signing_key.verifying_key(),
+    ));
+    challenge.resolved_at = Some(Utc::now().to_rfc3339());
+    challenge.resolution_note = Some("demo challenge rejected".to_string());
+    challenge.signature = sign_challenge_record(&challenge, &verifier_signing_key)?;
+    store.record_challenge_record(&challenge).await?;
+    fs::write(
+        demo_root.join("challenge_resolved.json"),
+        serde_json::to_vec_pretty(&challenge)?,
+    )?;
+
+    let provider_capabilities = store.list_provider_capabilities().await?;
+    let claims = store.list_job_claims().await?;
+    let assignments = store.list_job_assignments().await?;
+    let availability_records = store.list_receipt_availability().await?;
+    let provider_status = build_provider_network_status(
+        &provider_capabilities,
+        &claims,
+        &assignments,
+        &availability_records,
+    );
+    fs::write(
+        demo_root.join("provider_status.json"),
+        serde_json::to_vec_pretty(&provider_status)?,
+    )?;
+
+    let settlement = build_settlement_report(&store, job_id).await?;
+    fs::write(
+        demo_root.join("settlement_status.json"),
+        serde_json::to_vec_pretty(&settlement)?,
+    )?;
+
+    let announcement_record = store.load_job_announcement(&job_id.to_string()).await?;
+    let job_spec_record = store.load_job_spec(&job_id.to_string()).await?;
+    let claim_records = store.load_job_claims_by_job(&job_id.to_string()).await?;
+    let assignment_record = store.load_job_assignment(&job_id.to_string()).await?;
+    let receipt_records = store
+        .load_receipt_availability_by_job(&job_id.to_string())
+        .await?;
+    let verification_receipts = store
+        .load_verification_receipts_by_job(&job_id.to_string())
+        .await?;
+    let challenge_records = store
+        .load_challenge_records_by_job(&job_id.to_string())
+        .await?;
+    let job_status_json = serde_json::json!({
+        "job_id": job_id,
+        "job_spec": job_spec_record,
+        "job_announcement": announcement_record,
+        "claims": claim_records,
+        "assignment": assignment_record,
+        "receipt_availability": receipt_records,
+        "verification_receipts": verification_receipts,
+        "quorum": quorum_before_challenge,
+        "challenges": challenge_records,
+        "settlement": settlement
+    });
+    fs::write(
+        demo_root.join("job_status.json"),
+        serde_json::to_vec_pretty(&job_status_json)?,
+    )?;
+
+    let provider_b_executed = store
+        .load_receipt_availability(&job_id.to_string(), "provider-b")
+        .await?
+        .is_some();
+    let ready = settlement.settlement_ready;
+    let summary = LocalSettlementDemoSummary {
+        ready,
+        work_root: work_root.display().to_string(),
+        repo_root: repo_root.display().to_string(),
+        kept_artifacts: keep_artifacts || work_root.starts_with(env::temp_dir()),
+        job_id,
+        provider_a_executed: true,
+        provider_b_executed,
+        quorum_status: format!("{:?}", quorum_before_challenge.status),
+        settlement_ready: settlement.settlement_ready,
+        lifecycle_state: format!("{:?}", settlement.lifecycle_state),
+        files: serde_json::json!({
+            "job_spec": job_spec_path,
+            "evidence_dir": output.evidence_dir,
+            "verification_receipt_path": verification_output.verification_receipt_path,
+            "job_status": demo_root.join("job_status.json"),
+            "provider_status": demo_root.join("provider_status.json"),
+            "quorum_status": demo_root.join("quorum_status.json"),
+            "settlement_status": demo_root.join("settlement_status.json")
+        }),
+    };
+    fs::write(
+        demo_root.join("summary.json"),
+        serde_json::to_vec_pretty(&summary)?,
+    )?;
+    Ok(summary)
+}
+
+fn inspect_command(name: &str, version_args: &[&str]) -> CommandAvailability {
+    let path = std::env::var_os("PATH")
+        .and_then(|_| std::process::Command::new("which").arg(name).output().ok())
+        .and_then(|output| {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                (!text.is_empty()).then_some(text)
+            } else {
+                None
+            }
+        });
+    let available = path.is_some();
+    let version = if available {
+        std::process::Command::new(name)
+            .args(version_args)
+            .output()
+            .ok()
+            .map(|output| {
+                let text = if output.stdout.is_empty() {
+                    String::from_utf8_lossy(&output.stderr).to_string()
+                } else {
+                    String::from_utf8_lossy(&output.stdout).to_string()
+                };
+                text.trim().to_string()
+            })
+            .filter(|text| !text.is_empty())
+    } else {
+        None
+    };
+    CommandAvailability {
+        available,
+        path,
+        version,
+    }
+}
+
+fn run_dsp_doctor(repo_root: &Path) -> Result<DspDoctorStatus> {
+    let output = std::process::Command::new("uv")
+        .arg("run")
+        .arg("osciris")
+        .arg("doctor")
+        .current_dir(repo_root)
+        .output()
+        .with_context(|| format!("failed to run DSP doctor in {}", repo_root.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Ok(DspDoctorStatus {
+        invoked: true,
+        ok: output.status.success(),
+        exit_code: output.status.code(),
+        output_json: serde_json::from_str(&stdout).ok(),
+        stderr: (!stderr.is_empty()).then_some(stderr),
+    })
+}
+
+fn seed_base64(byte: u8) -> String {
+    BASE64.encode([byte; 32])
+}
+
+fn mock_demo_job(job_id: Uuid) -> JobSpec {
+    let script = r#"import json, pathlib, sys; output_dir = pathlib.Path(sys.argv[sys.argv.index("--output-dir") + 1]); output_dir.mkdir(parents=True, exist_ok=True); (output_dir / "llm_lora_economics.json").write_text(json.dumps({"kind": "llm_lora_economics_benchmark", "config": {"model_id": "mock-7b"}, "aggregate": {"quality_retention": 0.96}, "runs": [{"mode": "raw_lora", "eval_loss": 1.2}, {"mode": "dsp_prepared_lora", "eval_loss": 1.25}]}, indent=2), encoding="utf-8"); (output_dir / "llm_lora_economics.csv").write_text("mode,quality\nraw_lora,1.0\ndsp_prepared_lora,0.96\n", encoding="utf-8"); print("osciris demo workload complete")"#;
+    JobSpec {
+        job_id,
+        job_type: JobType::LlmLoraEconomics,
+        dataset: Some("enterprise_synthetic".to_string()),
+        model_id: Some("mock-7b".to_string()),
+        command: "python3".to_string(),
+        args: vec!["-c".to_string(), script.to_string()],
+        privacy_policy: PrivacyPolicy {
+            privacy_mode: PrivacyMode::DspPrepared,
+            release_object: "model".to_string(),
+            formal_dp_claim: false,
+            sensitive_field_policy: "configured_guard".to_string(),
+            evidence_profile: "developer_demo_local_settlement".to_string(),
+        },
+        required_verifier_count: 1,
+        challenge_window_seconds: 3600,
+        payment_token: "USDC_TEST".to_string(),
+        escrow_amount_atomic: "1000000".to_string(),
+        created_at: Utc::now().to_rfc3339(),
+    }
+}
+
+fn signed_provider_capability(
+    node_id: &str,
+    public_key: &str,
+    signing_key: &ed25519_dalek::SigningKey,
+    host_class: &str,
+) -> Result<ProviderCapability> {
+    let mut capability = ProviderCapability {
+        node_id: node_id.to_string(),
+        ed25519_public_key_base64: public_key.to_string(),
+        host_class: host_class.to_string(),
+        gpu_model: "NVIDIA A10G".to_string(),
+        gpu_count: 1,
+        vram_gb: 24.0,
+        cuda_available: true,
+        mps_available: false,
+        supported_job_types: vec![JobType::LlmLoraEconomics],
+        supported_runtimes: vec!["python3".to_string()],
+        pricing_hint: Some("demo".to_string()),
+        current_load: 0.0,
+        active_job_count: 0,
+        status: NodeStatus::OnlineIdle,
+        updated_at: Utc::now().to_rfc3339(),
+        signature: String::new(),
+    };
+    capability.signature = sign_provider_capability(&capability, signing_key)?;
+    Ok(capability)
+}
+
+fn signed_job_claim(
+    provider_id: &str,
+    public_key: &str,
+    signing_key: &ed25519_dalek::SigningKey,
+    job_id: Uuid,
+) -> Result<JobClaim> {
+    let mut claim = JobClaim {
+        job_id,
+        provider_node_id: provider_id.to_string(),
+        provider_ed25519_public_key_base64: public_key.to_string(),
+        claimed_at: Utc::now().to_rfc3339(),
+        claim_note: Some("demo_claim".to_string()),
+        signature: String::new(),
+    };
+    claim.signature = sign_job_claim(&claim, signing_key)?;
+    Ok(claim)
+}
+
+struct ScopedGpuEnvironment {
+    previous_model: Option<String>,
+    previous_driver: Option<String>,
+    previous_cuda: Option<String>,
+    previous_vram: Option<String>,
+}
+
+impl ScopedGpuEnvironment {
+    fn set(gpu_model: &str, driver: &str, cuda_available: bool, vram_gb: Option<f64>) -> Self {
+        let previous_model = env::var("OSCIRIS_GPU_MODEL").ok();
+        let previous_driver = env::var("OSCIRIS_GPU_DRIVER").ok();
+        let previous_cuda = env::var("OSCIRIS_CUDA_AVAILABLE").ok();
+        let previous_vram = env::var("OSCIRIS_GPU_VRAM_GB").ok();
+        env::set_var("OSCIRIS_GPU_MODEL", gpu_model);
+        env::set_var("OSCIRIS_GPU_DRIVER", driver);
+        env::set_var(
+            "OSCIRIS_CUDA_AVAILABLE",
+            if cuda_available { "true" } else { "false" },
+        );
+        if let Some(vram_gb) = vram_gb {
+            env::set_var("OSCIRIS_GPU_VRAM_GB", vram_gb.to_string());
+        } else {
+            env::remove_var("OSCIRIS_GPU_VRAM_GB");
+        }
+        Self {
+            previous_model,
+            previous_driver,
+            previous_cuda,
+            previous_vram,
+        }
+    }
+}
+
+impl Drop for ScopedGpuEnvironment {
+    fn drop(&mut self) {
+        restore_env_var("OSCIRIS_GPU_MODEL", self.previous_model.take());
+        restore_env_var("OSCIRIS_GPU_DRIVER", self.previous_driver.take());
+        restore_env_var("OSCIRIS_CUDA_AVAILABLE", self.previous_cuda.take());
+        restore_env_var("OSCIRIS_GPU_VRAM_GB", self.previous_vram.take());
+    }
+}
+
+fn restore_env_var(name: &str, value: Option<String>) {
+    if let Some(value) = value {
+        env::set_var(name, value);
+    } else {
+        env::remove_var(name);
+    }
+}
+
 fn parse_challenge_reason_code(value: &str) -> Result<ChallengeReasonCode> {
     match value {
         "artifact_hash_mismatch" => Ok(ChallengeReasonCode::ArtifactHashMismatch),
@@ -1921,6 +2591,41 @@ mod tests {
             .block_on(store.load_verification_receipts_by_verifier("verifier-a"))
             .unwrap();
         assert!(receipts.is_empty());
+        std::fs::remove_dir_all(work_root).unwrap();
+    }
+
+    #[test]
+    fn doctor_reports_protocol_readiness() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let work_root = temp_work_root("osciris-doctor");
+        let report = runtime
+            .block_on(run_doctor(None, Some(work_root.clone())))
+            .unwrap();
+        assert!(report.ready);
+        assert!(report.work_root_writable);
+        assert!(report.protocol_store_ready);
+        std::fs::remove_dir_all(work_root).unwrap();
+    }
+
+    #[test]
+    fn local_settlement_demo_reaches_settlement_ready() {
+        if !inspect_command("python3", &["--version"]).available {
+            return;
+        }
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let work_root = temp_work_root("osciris-demo");
+        let summary = runtime
+            .block_on(run_local_settlement_demo(
+                Some(work_root.clone()),
+                Some(work_root.clone()),
+                true,
+            ))
+            .unwrap();
+        assert!(summary.ready);
+        assert!(summary.provider_a_executed);
+        assert!(!summary.provider_b_executed);
+        assert!(summary.settlement_ready);
         std::fs::remove_dir_all(work_root).unwrap();
     }
 }

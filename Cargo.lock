@@ -4058,8 +4058,10 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "anyhow",
+ "base64",
  "chrono",
  "clap",
+ "ed25519-dalek",
  "flate2",
  "osciris-chain",
  "osciris-core",
