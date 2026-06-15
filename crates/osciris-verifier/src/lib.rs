@@ -213,6 +213,11 @@ async fn verify_metrics(evidence_dir: &Path, receipt: &ExecutionReceipt) -> Resu
             && payload.get("aggregate").is_some()
             && payload.get("runs").is_some()
             && payload.get("config").is_some()),
+        JobType::InferenceEconomics => Ok(payload.get("kind").and_then(|v| v.as_str())
+            == Some("inference_economics_benchmark")
+            && payload.get("aggregate").is_some()
+            && payload.get("runs").is_some()
+            && payload.get("config").is_some()),
         JobType::ProductionProof => {
             Ok(payload.get("tracks").is_some() && payload.get("status_counts").is_some())
         }
@@ -404,6 +409,78 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(
+            store
+                .verification_receipt_count(&job.job_id.to_string())
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn verifier_accepts_inference_economics_bundle() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider_seed = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=".to_string();
+        let provider = ProviderConfig {
+            provider_id: "provider-1".to_string(),
+            signing_key_id: "provider-key-1".to_string(),
+            signing_key_seed_base64: provider_seed.clone(),
+            repo_root: temp.path().to_path_buf(),
+            work_root: temp.path().to_path_buf(),
+        };
+        let script = r#"import json, pathlib, sys; output_dir = pathlib.Path(sys.argv[sys.argv.index("--output-dir") + 1]); output_dir.mkdir(parents=True, exist_ok=True); (output_dir / "inference_economics.json").write_text(json.dumps({"kind": "inference_economics_benchmark", "config": {"model": "mock-instruct"}, "aggregate": {"cost_to_quality_savings_mean": 0.42}, "runs": [{"seed": 11}]}, indent=2), encoding="utf-8")"#;
+        let mut job = sample_job("python3", vec!["-c".to_string(), script.to_string()]);
+        job.job_type = JobType::InferenceEconomics;
+        job.model_id = Some("mock-instruct".to_string());
+        let run = run_job(&job, &provider).await.unwrap();
+        let store = ProtocolStore::open(&temp.path().join(".osciris"))
+            .await
+            .unwrap();
+        let provider_signing_key = load_signing_key_from_base64_seed(&provider_seed).unwrap();
+        let mut provider_capability = ProviderCapability {
+            node_id: provider.provider_id.clone(),
+            ed25519_public_key_base64: verifying_key_to_base64(
+                &provider_signing_key.verifying_key(),
+            ),
+            host_class: "local-mock".to_string(),
+            gpu_model: "none".to_string(),
+            gpu_count: 0,
+            vram_gb: 0.0,
+            cuda_available: false,
+            mps_available: false,
+            supported_job_types: vec![JobType::InferenceEconomics],
+            supported_runtimes: vec!["python".to_string()],
+            pricing_hint: Some("local test".to_string()),
+            current_load: 0.0,
+            active_job_count: 0,
+            status: NodeStatus::OnlineIdle,
+            updated_at: "2026-06-15T00:00:00Z".to_string(),
+            signature: String::new(),
+        };
+        provider_capability.signature =
+            sign_provider_capability(&provider_capability, &provider_signing_key).unwrap();
+        store
+            .record_provider_capability(&provider_capability)
+            .await
+            .unwrap();
+
+        let verifier = VerifierConfig {
+            verifier_id: "verifier-1".to_string(),
+            signing_key_id: "verifier-key-1".to_string(),
+            signing_key_seed_base64: "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=".to_string(),
+        };
+        let provider_key = load_signing_key_from_base64_seed(&provider_seed)
+            .unwrap()
+            .verifying_key();
+        let output = verify_bundle(
+            &run.evidence_dir,
+            &verifying_key_to_base64(&provider_key),
+            &verifier,
+        )
+        .await
+        .unwrap();
+        assert!(output.verification_receipt_path.exists());
         assert_eq!(
             store
                 .verification_receipt_count(&job.job_id.to_string())

@@ -46,6 +46,17 @@ use tar::Builder;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+#[derive(Debug, Clone)]
+struct SubmitJobArgOptions {
+    samples: u32,
+    eval_samples: u32,
+    seed: u32,
+    seeds: Option<String>,
+    max_steps: u32,
+    timeout: u32,
+    backend: String,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "osciris-node", version, about = "OSCIRIS protocol node CLI")]
 struct Cli {
@@ -70,20 +81,28 @@ enum Commands {
         command: IdentityCommands,
     },
     SubmitJob {
+        #[arg(long, default_value = "llm_lora_economics")]
+        job_type: String,
         #[arg(long, default_value = "enterprise_synthetic")]
         dataset: String,
         #[arg(long, default_value = "Qwen/Qwen2.5-7B-Instruct")]
         model_id: String,
         #[arg(long, default_value = "uv run osciris llm-lora-economics")]
         command: String,
+        #[arg(long, default_value = "transformers_causal_lm")]
+        backend: String,
         #[arg(long, default_value_t = 24)]
         samples: u32,
+        #[arg(long)]
+        seeds: Option<String>,
         #[arg(long, default_value_t = 8)]
         eval_samples: u32,
         #[arg(long, default_value_t = 11)]
         seed: u32,
         #[arg(long, default_value_t = 20)]
         max_steps: u32,
+        #[arg(long, default_value_t = 300)]
+        timeout: u32,
         #[arg(long, default_value_t = 1)]
         required_verifier_count: u8,
         #[arg(long, default_value_t = 3600)]
@@ -660,41 +679,50 @@ fn main() -> Result<()> {
             }
         },
         Commands::SubmitJob {
+            job_type,
             dataset,
             model_id,
             command,
+            backend,
             samples,
+            seeds,
             eval_samples,
             seed,
             max_steps,
+            timeout,
             required_verifier_count,
             challenge_window_seconds,
             payment_token,
             escrow_amount_atomic,
             output,
         } => {
+            let parsed_job_type = parse_job_type(&job_type)?;
+            let command = default_command_for_job_type(&parsed_job_type, &command);
+            let args = structured_submit_job_args(
+                &parsed_job_type,
+                SubmitJobArgOptions {
+                    samples,
+                    eval_samples,
+                    seed,
+                    seeds,
+                    max_steps,
+                    timeout,
+                    backend,
+                },
+            );
             let job = JobSpec {
                 job_id: Uuid::now_v7(),
-                job_type: JobType::LlmLoraEconomics,
+                job_type: parsed_job_type.clone(),
                 dataset: Some(dataset),
                 model_id: Some(model_id),
                 command,
-                args: vec![
-                    "--samples".to_string(),
-                    samples.to_string(),
-                    "--eval-samples".to_string(),
-                    eval_samples.to_string(),
-                    "--seed".to_string(),
-                    seed.to_string(),
-                    "--max-steps".to_string(),
-                    max_steps.to_string(),
-                ],
+                args,
                 privacy_policy: PrivacyPolicy {
                     privacy_mode: PrivacyMode::DspPrepared,
-                    release_object: "model".to_string(),
+                    release_object: release_object_for_job_type(&parsed_job_type).to_string(),
                     formal_dp_claim: false,
                     sensitive_field_policy: "configured_guard".to_string(),
-                    evidence_profile: "phase1_llm_lora_economics".to_string(),
+                    evidence_profile: evidence_profile_for_job_type(&parsed_job_type).to_string(),
                 },
                 required_verifier_count,
                 challenge_window_seconds,
@@ -2195,6 +2223,76 @@ fn run_dsp_doctor(repo_root: &Path) -> Result<DspDoctorStatus> {
 
 fn seed_base64(byte: u8) -> String {
     BASE64.encode([byte; 32])
+}
+
+fn parse_job_type(raw: &str) -> Result<JobType> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "llm_lora_economics" | "llm-lora-economics" => Ok(JobType::LlmLoraEconomics),
+        "inference_economics" | "inference-economics" => Ok(JobType::InferenceEconomics),
+        "production_proof" | "production-proof" => Ok(JobType::ProductionProof),
+        other => bail!(
+            "unsupported job type {other:?}; expected llm_lora_economics, inference_economics, or production_proof"
+        ),
+    }
+}
+
+fn default_command_for_job_type(job_type: &JobType, command: &str) -> String {
+    if command != "uv run osciris llm-lora-economics" {
+        return command.to_string();
+    }
+
+    match job_type {
+        JobType::LlmLoraEconomics => command.to_string(),
+        JobType::InferenceEconomics => "uv run osciris inference-economics".to_string(),
+        JobType::ProductionProof => "uv run osciris production-proof".to_string(),
+    }
+}
+
+fn structured_submit_job_args(job_type: &JobType, options: SubmitJobArgOptions) -> Vec<String> {
+    match job_type {
+        JobType::LlmLoraEconomics => vec![
+            "--samples".to_string(),
+            options.samples.to_string(),
+            "--eval-samples".to_string(),
+            options.eval_samples.to_string(),
+            "--seed".to_string(),
+            options.seed.to_string(),
+            "--max-steps".to_string(),
+            options.max_steps.to_string(),
+        ],
+        JobType::InferenceEconomics => vec![
+            "--samples".to_string(),
+            options.samples.to_string(),
+            "--seeds".to_string(),
+            options.seeds.unwrap_or_else(|| options.seed.to_string()),
+            "--backend".to_string(),
+            options.backend,
+            "--timeout".to_string(),
+            options.timeout.to_string(),
+        ],
+        JobType::ProductionProof => vec![
+            "--samples".to_string(),
+            options.samples.to_string(),
+            "--seeds".to_string(),
+            options.seeds.unwrap_or_else(|| options.seed.to_string()),
+        ],
+    }
+}
+
+fn release_object_for_job_type(job_type: &JobType) -> &'static str {
+    match job_type {
+        JobType::LlmLoraEconomics => "model",
+        JobType::InferenceEconomics => "inference_output",
+        JobType::ProductionProof => "evidence_bundle",
+    }
+}
+
+fn evidence_profile_for_job_type(job_type: &JobType) -> &'static str {
+    match job_type {
+        JobType::LlmLoraEconomics => "phase1_llm_lora_economics",
+        JobType::InferenceEconomics => "phase1_inference_economics",
+        JobType::ProductionProof => "phase1_production_proof",
+    }
 }
 
 fn private_key_signer_from_hex(raw: &str) -> Result<PrivateKeySigner> {

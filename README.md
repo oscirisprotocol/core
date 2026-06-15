@@ -2,7 +2,7 @@
 
 `protocol-rs` is the public developer entrypoint for OSCIRIS.
 
-OSCIRIS is a privacy-first decentralized AI training protocol. This workspace
+OSCIRIS is a privacy-first decentralized AI training and inference protocol. This workspace
 contains the Rust node CLI, off-chain protocol runtime, verifier path, and
 Horizen testnet chain client.
 
@@ -14,10 +14,19 @@ Horizen testnet chain client.
 - The current protocol slice supports signed claims, enterprise assignment,
   provider execution receipts, verifier receipts, quorum, challenge gating, and
   settlement-ready local state.
+- Receipt-backed Python workloads now include both `llm_lora_economics` and
+  `inference_economics`.
 
 ## Latest Metrics
 
-Primary bounded evidence: `osciris-enterprise-eff-20260603-1920`
+Primary inference evidence on AWS `g6e.xlarge` NVIDIA L40S:
+
+- `Qwen/Qwen2.5-7B-Instruct` cost-to-quality savings: `58.87%`
+- `Qwen/Qwen2.5-3B-Instruct` cost-to-quality savings: `59.53%`
+- `mistralai/Mistral-7B-Instruct-v0.3` cost-to-quality savings: `42.62%`
+- fixture: `enterprise_policy_qa_fixtures`, `24` cases, seeds `11,22,33`
+
+Primary adaptation evidence: `osciris-enterprise-eff-20260603-1920`
 
 - `Qwen/Qwen2.5-7B-Instruct` mean cost-to-quality savings: `16.08%`
 - `mistralai/Mistral-7B-v0.1` mean cost-to-quality savings: `12.55%`
@@ -55,6 +64,31 @@ osciris-node identity generate \
   --work-root /tmp/osciris-provider-a
 ```
 
+Generate an inference-economics job spec:
+
+```bash
+osciris-node submit-job \
+  --job-type inference_economics \
+  --dataset enterprise_policy_qa_fixtures \
+  --model-id mistralai/Mistral-7B-Instruct-v0.3 \
+  --samples 24 \
+  --seeds 11,22,33 \
+  --backend transformers_causal_lm \
+  --output /tmp/osciris-inference-job.json
+```
+
+Run the job as a provider:
+
+```bash
+osciris-node run-provider \
+  --job-spec /tmp/osciris-inference-job.json \
+  --provider-id provider-a \
+  --signing-key-id provider-a-key \
+  --signing-key-seed-base64 "$PROVIDER_SEED" \
+  --repo-root /absolute/path/to/OSCIRIS \
+  --work-root /tmp/osciris-provider-a
+```
+
 Multi-machine onboarding:
 
 [docs/multi_host_testnet_join_guide.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/protocol-rs/docs/multi_host_testnet_join_guide.md)
@@ -72,3 +106,4 @@ This repo does not claim:
 - audited privacy guarantees
 - public permissionless bootstrap
 - trustless hardware attestation
+- production inference SLA

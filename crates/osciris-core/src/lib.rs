@@ -39,6 +39,7 @@ pub enum CoreError {
 #[serde(rename_all = "snake_case")]
 pub enum JobType {
     LlmLoraEconomics,
+    InferenceEconomics,
     ProductionProof,
 }
 

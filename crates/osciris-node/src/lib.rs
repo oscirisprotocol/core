@@ -214,7 +214,11 @@ fn merge_structured_job_args(argv: &mut Vec<String>, job_spec: &JobSpec) {
     }
 
     if let Some(model_id) = &job_spec.model_id {
-        ensure_option_value(argv, "--model-id", model_id.clone());
+        let model_flag = match job_spec.job_type {
+            JobType::InferenceEconomics => "--model",
+            _ => "--model-id",
+        };
+        ensure_option_value(argv, model_flag, model_id.clone());
     }
 }
 
@@ -240,6 +244,7 @@ fn has_flag(argv: &[String], flag: &str) -> bool {
 fn expected_metrics_path(job_type: JobType, output_dir: &Path) -> PathBuf {
     match job_type {
         JobType::LlmLoraEconomics => output_dir.join("llm_lora_economics.json"),
+        JobType::InferenceEconomics => output_dir.join("inference_economics.json"),
         JobType::ProductionProof => output_dir.join("production_proof_suite.json"),
     }
 }
@@ -406,5 +411,41 @@ mod tests {
 
         assert!(rendered.contains("--model-id Qwen/Qwen2.5-7B-Instruct"));
         assert!(rendered.contains("--output-dir /tmp/output"));
+    }
+
+    #[test]
+    fn build_command_argv_uses_model_flag_for_inference_economics() {
+        let mut job = sample_job("uv run osciris inference-economics", vec![]);
+        job.job_type = JobType::InferenceEconomics;
+        job.model_id = Some("mistralai/Mistral-7B-Instruct-v0.3".to_string());
+
+        let argv = build_command_argv(&job, Path::new("/tmp/output")).unwrap();
+        let rendered = argv.join(" ");
+
+        assert!(rendered.contains("--model mistralai/Mistral-7B-Instruct-v0.3"));
+        assert!(!rendered.contains("--model-id"));
+        assert!(rendered.contains("--output-dir /tmp/output"));
+    }
+
+    #[tokio::test]
+    async fn run_job_writes_inference_economics_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider = ProviderConfig {
+            provider_id: "provider-1".to_string(),
+            signing_key_id: "provider-key-1".to_string(),
+            signing_key_seed_base64: "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=".to_string(),
+            repo_root: temp.path().to_path_buf(),
+            work_root: temp.path().to_path_buf(),
+        };
+        let script = r#"import json, pathlib, sys; output_dir = pathlib.Path(sys.argv[sys.argv.index("--output-dir") + 1]); output_dir.mkdir(parents=True, exist_ok=True); (output_dir / "inference_economics.json").write_text(json.dumps({"kind": "inference_economics_benchmark", "config": {"model": "mock-instruct"}, "aggregate": {"cost_to_quality_savings_mean": 0.42}, "runs": [{"seed": 11}]}, indent=2), encoding="utf-8"); print("mock inference benchmark complete")"#;
+        let mut job = sample_job("python3", vec!["-c".to_string(), script.to_string()]);
+        job.job_type = JobType::InferenceEconomics;
+        job.model_id = Some("mock-instruct".to_string());
+
+        let output = run_job(&job, &provider).await.unwrap();
+        assert!(output.execution_receipt_path.exists());
+        assert!(output.receipt_bundle_path.exists());
+        assert!(output.metrics_path.ends_with("inference_economics.json"));
+        assert!(output.metrics_path.exists());
     }
 }
