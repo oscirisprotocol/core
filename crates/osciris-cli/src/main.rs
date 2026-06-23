@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chrono::Utc;
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use osciris_chain::{
@@ -122,7 +122,9 @@ enum Commands {
         #[arg(long)]
         signing_key_id: String,
         #[arg(long)]
-        signing_key_seed_base64: String,
+        signing_key_seed_base64: Option<String>,
+        #[arg(long)]
+        signing_key_seed_file: Option<PathBuf>,
         #[arg(long)]
         repo_root: PathBuf,
         #[arg(long)]
@@ -304,7 +306,9 @@ enum NetworkCommands {
         #[arg(long)]
         work_root: PathBuf,
         #[arg(long)]
-        signing_key_seed_base64: String,
+        signing_key_seed_base64: Option<String>,
+        #[arg(long)]
+        signing_key_seed_file: Option<PathBuf>,
         #[arg(long, default_value = "/ip4/127.0.0.1/tcp/0")]
         listen_addr: String,
         #[arg(long = "bootstrap-peer")]
@@ -330,6 +334,40 @@ enum NetworkCommands {
         #[arg(long)]
         capability_json: PathBuf,
     },
+    CreateProviderCapability {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        node_id: String,
+        #[arg(long)]
+        signing_key_seed_base64: Option<String>,
+        #[arg(long)]
+        signing_key_seed_file: Option<PathBuf>,
+        #[arg(long, default_value = "aws_g5_xlarge")]
+        host_class: String,
+        #[arg(long, default_value = "NVIDIA A10G")]
+        gpu_model: String,
+        #[arg(long, default_value_t = 1)]
+        gpu_count: u32,
+        #[arg(long, default_value_t = 24.0)]
+        vram_gb: f64,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        cuda_available: bool,
+        #[arg(long, default_value_t = false, action = ArgAction::Set)]
+        mps_available: bool,
+        #[arg(long = "supported-job-type")]
+        supported_job_types: Vec<String>,
+        #[arg(long = "supported-runtime")]
+        supported_runtimes: Vec<String>,
+        #[arg(long)]
+        pricing_hint: Option<String>,
+        #[arg(long, default_value_t = 0.0)]
+        current_load: f64,
+        #[arg(long, default_value_t = 0)]
+        active_job_count: u32,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     Providers {
         #[arg(long)]
         work_root: PathBuf,
@@ -352,7 +390,9 @@ enum NetworkCommands {
         #[arg(long)]
         submitter_id: String,
         #[arg(long)]
-        signing_key_seed_base64: String,
+        signing_key_seed_base64: Option<String>,
+        #[arg(long)]
+        signing_key_seed_file: Option<PathBuf>,
         #[arg(long, default_value = "gpu>=24gb")]
         required_capability: String,
         #[arg(long, default_value = "short")]
@@ -382,7 +422,9 @@ enum NetworkCommands {
         #[arg(long)]
         assigner_id: String,
         #[arg(long)]
-        signing_key_seed_base64: String,
+        signing_key_seed_base64: Option<String>,
+        #[arg(long)]
+        signing_key_seed_file: Option<PathBuf>,
         #[arg(long, default_value = "manual_assignment")]
         assignment_reason: String,
     },
@@ -520,7 +562,9 @@ enum NetworkCommands {
         #[arg(long)]
         work_root: PathBuf,
         #[arg(long)]
-        signing_key_seed_base64: String,
+        signing_key_seed_base64: Option<String>,
+        #[arg(long)]
+        signing_key_seed_file: Option<PathBuf>,
         #[arg(long)]
         verifier_id: String,
         #[arg(long)]
@@ -540,7 +584,9 @@ enum NetworkCommands {
         #[arg(long)]
         work_root: PathBuf,
         #[arg(long)]
-        signing_key_seed_base64: String,
+        signing_key_seed_base64: Option<String>,
+        #[arg(long)]
+        signing_key_seed_file: Option<PathBuf>,
         #[arg(long)]
         signing_key_id: String,
         #[arg(long)]
@@ -738,6 +784,7 @@ fn main() -> Result<()> {
             provider_id,
             signing_key_id,
             signing_key_seed_base64,
+            signing_key_seed_file,
             repo_root,
             work_root,
         } => {
@@ -745,7 +792,10 @@ fn main() -> Result<()> {
             let provider = ProviderConfig {
                 provider_id,
                 signing_key_id,
-                signing_key_seed_base64,
+                signing_key_seed_base64: load_signing_seed_from_source(
+                    signing_key_seed_base64,
+                    signing_key_seed_file,
+                )?,
                 repo_root,
                 work_root,
             };
@@ -1011,11 +1061,14 @@ fn main() -> Result<()> {
             NetworkCommands::Serve {
                 work_root,
                 signing_key_seed_base64,
+                signing_key_seed_file,
                 listen_addr,
                 bootstrap_peers,
                 presence_interval_seconds,
                 run_seconds,
             } => {
+                let signing_key_seed_base64 =
+                    load_signing_seed_from_source(signing_key_seed_base64, signing_key_seed_file)?;
                 let summary = runtime.block_on(serve_presence(&NetworkServeConfig {
                     protocol_root: work_root.join(".osciris"),
                     signing_key_seed_base64,
@@ -1058,6 +1111,55 @@ fn main() -> Result<()> {
                 runtime.block_on(store.record_provider_capability(&capability))?;
                 print_json(&capability)?;
             }
+            NetworkCommands::CreateProviderCapability {
+                work_root,
+                node_id,
+                signing_key_seed_base64,
+                signing_key_seed_file,
+                host_class,
+                gpu_model,
+                gpu_count,
+                vram_gb,
+                cuda_available,
+                mps_available,
+                supported_job_types,
+                supported_runtimes,
+                pricing_hint,
+                current_load,
+                active_job_count,
+                output,
+            } => {
+                let store = runtime.block_on(ProtocolStore::open(&work_root.join(".osciris")))?;
+                let signing_key = load_signing_key_from_seed_source(
+                    signing_key_seed_base64,
+                    signing_key_seed_file,
+                )?;
+                let capability = create_signed_provider_capability(
+                    &node_id,
+                    &signing_key,
+                    &host_class,
+                    &gpu_model,
+                    gpu_count,
+                    vram_gb,
+                    cuda_available,
+                    mps_available,
+                    &supported_job_types,
+                    &supported_runtimes,
+                    pricing_hint,
+                    current_load,
+                    active_job_count,
+                )?;
+                runtime.block_on(store.record_provider_capability(&capability))?;
+                if let Some(output) = output {
+                    if let Some(parent) = output.parent() {
+                        fs::create_dir_all(parent)
+                            .with_context(|| format!("failed to create {}", parent.display()))?;
+                    }
+                    fs::write(&output, serde_json::to_vec_pretty(&capability)?)
+                        .with_context(|| format!("failed to write {}", output.display()))?;
+                }
+                print_json(&capability)?;
+            }
             NetworkCommands::Providers { work_root } => {
                 let store = runtime.block_on(ProtocolStore::open(&work_root.join(".osciris")))?;
                 let providers = runtime.block_on(store.list_provider_capabilities())?;
@@ -1094,6 +1196,7 @@ fn main() -> Result<()> {
                 job_spec,
                 submitter_id,
                 signing_key_seed_base64,
+                signing_key_seed_file,
                 required_capability,
                 estimated_runtime_class,
             } => {
@@ -1102,7 +1205,10 @@ fn main() -> Result<()> {
                     &std::fs::read(&job_spec)
                         .with_context(|| format!("failed to read {}", job_spec.display()))?,
                 )?;
-                let signing_key = load_signing_key_from_base64_seed(&signing_key_seed_base64)?;
+                let signing_key = load_signing_key_from_seed_source(
+                    signing_key_seed_base64,
+                    signing_key_seed_file,
+                )?;
                 let mut announcement = JobAnnouncement {
                     job_id: job.job_id,
                     job_spec: job.clone(),
@@ -1152,6 +1258,7 @@ fn main() -> Result<()> {
                 provider_id,
                 assigner_id,
                 signing_key_seed_base64,
+                signing_key_seed_file,
                 assignment_reason,
             } => {
                 let store = runtime.block_on(ProtocolStore::open(&work_root.join(".osciris")))?;
@@ -1165,7 +1272,10 @@ fn main() -> Result<()> {
                 if claim.is_none() {
                     bail!("cannot assign job {job_id} to provider {provider_id}; provider has no stored signed claim");
                 }
-                let signing_key = load_signing_key_from_base64_seed(&signing_key_seed_base64)?;
+                let signing_key = load_signing_key_from_seed_source(
+                    signing_key_seed_base64,
+                    signing_key_seed_file,
+                )?;
                 let mut assignment = JobAssignment {
                     job_id,
                     assigned_provider_node_id: provider_id,
@@ -1522,6 +1632,7 @@ fn main() -> Result<()> {
             NetworkCommands::RunVerifier {
                 work_root,
                 signing_key_seed_base64,
+                signing_key_seed_file,
                 verifier_id,
                 signing_key_id,
                 listen_addr,
@@ -1530,6 +1641,8 @@ fn main() -> Result<()> {
                 run_seconds,
                 announce_seconds,
             } => {
+                let signing_key_seed_base64 =
+                    load_signing_seed_from_source(signing_key_seed_base64, signing_key_seed_file)?;
                 let summary = runtime.block_on(auto_fetch_receipts(&AutoVerifierConfig {
                     protocol_root: work_root.join(".osciris"),
                     signing_key_seed_base64: signing_key_seed_base64.clone(),
@@ -1587,6 +1700,7 @@ fn main() -> Result<()> {
             NetworkCommands::RunProvider {
                 work_root,
                 signing_key_seed_base64,
+                signing_key_seed_file,
                 signing_key_id,
                 repo_root,
                 listen_addr,
@@ -1594,6 +1708,8 @@ fn main() -> Result<()> {
                 presence_interval_seconds,
                 run_seconds,
             } => {
+                let signing_key_seed_base64 =
+                    load_signing_seed_from_source(signing_key_seed_base64, signing_key_seed_file)?;
                 let summary = runtime.block_on(run_auto_provider(&AutoProviderConfig {
                     protocol_root: work_root.join(".osciris"),
                     signing_key_seed_base64,
@@ -2236,6 +2352,34 @@ fn parse_job_type(raw: &str) -> Result<JobType> {
     }
 }
 
+fn load_signing_key_from_seed_source(
+    signing_key_seed_base64: Option<String>,
+    signing_key_seed_file: Option<PathBuf>,
+) -> Result<ed25519_dalek::SigningKey> {
+    let seed = load_signing_seed_from_source(signing_key_seed_base64, signing_key_seed_file)?;
+    load_signing_key_from_base64_seed(seed.trim()).context("invalid signing key seed")
+}
+
+fn load_signing_seed_from_source(
+    signing_key_seed_base64: Option<String>,
+    signing_key_seed_file: Option<PathBuf>,
+) -> Result<String> {
+    let seed = match (signing_key_seed_base64, signing_key_seed_file) {
+        (Some(seed), None) => seed,
+        (None, Some(path)) => {
+            fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?
+        }
+        (Some(_), Some(_)) => bail!(
+            "provide only one signing seed source: --signing-key-seed-base64 or --signing-key-seed-file"
+        ),
+        (None, None) => bail!(
+            "missing signing seed source: provide --signing-key-seed-base64 or --signing-key-seed-file"
+        ),
+    };
+    Ok(seed.trim().to_string())
+}
+
 fn default_command_for_job_type(job_type: &JobType, command: &str) -> String {
     if command != "uv run osciris llm-lora-economics" {
         return command.to_string();
@@ -2354,6 +2498,68 @@ fn signed_provider_capability(
         pricing_hint: Some("demo".to_string()),
         current_load: 0.0,
         active_job_count: 0,
+        status: NodeStatus::OnlineIdle,
+        updated_at: Utc::now().to_rfc3339(),
+        signature: String::new(),
+    };
+    capability.signature = sign_provider_capability(&capability, signing_key)?;
+    Ok(capability)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_signed_provider_capability(
+    node_id: &str,
+    signing_key: &ed25519_dalek::SigningKey,
+    host_class: &str,
+    gpu_model: &str,
+    gpu_count: u32,
+    vram_gb: f64,
+    cuda_available: bool,
+    mps_available: bool,
+    supported_job_types: &[String],
+    supported_runtimes: &[String],
+    pricing_hint: Option<String>,
+    current_load: f64,
+    active_job_count: u32,
+) -> Result<ProviderCapability> {
+    if gpu_count == 0 {
+        bail!("gpu_count must be greater than zero");
+    }
+    if vram_gb <= 0.0 {
+        bail!("vram_gb must be greater than zero");
+    }
+    if current_load < 0.0 {
+        bail!("current_load must be zero or greater");
+    }
+
+    let job_types = if supported_job_types.is_empty() {
+        vec![JobType::LlmLoraEconomics]
+    } else {
+        supported_job_types
+            .iter()
+            .map(|job_type| parse_job_type(job_type))
+            .collect::<Result<Vec<_>>>()?
+    };
+    let runtimes = if supported_runtimes.is_empty() {
+        vec!["python3".to_string()]
+    } else {
+        supported_runtimes.to_vec()
+    };
+
+    let mut capability = ProviderCapability {
+        node_id: node_id.to_string(),
+        ed25519_public_key_base64: verifying_key_to_base64(&signing_key.verifying_key()),
+        host_class: host_class.to_string(),
+        gpu_model: gpu_model.to_string(),
+        gpu_count,
+        vram_gb,
+        cuda_available,
+        mps_available,
+        supported_job_types: job_types,
+        supported_runtimes: runtimes,
+        pricing_hint,
+        current_load,
+        active_job_count,
         status: NodeStatus::OnlineIdle,
         updated_at: Utc::now().to_rfc3339(),
         signature: String::new(),
@@ -2655,8 +2861,8 @@ fn parse_node_role(raw: &str) -> Result<NodeRole> {
 mod tests {
     use super::*;
     use osciris_core::{
-        sign_verification_receipt, ExecutionStatus, GpuMetadata, VerificationChecks,
-        VerificationReceipt, VerificationStatus,
+        sign_verification_receipt, verify_provider_capability_signature, ExecutionStatus,
+        GpuMetadata, VerificationChecks, VerificationReceipt, VerificationStatus,
     };
 
     fn temp_work_root(name: &str) -> PathBuf {
@@ -2868,6 +3074,41 @@ mod tests {
         assert!(!summary.provider_b_executed);
         assert!(summary.settlement_ready);
         std::fs::remove_dir_all(work_root).unwrap();
+    }
+
+    #[test]
+    fn create_provider_capability_signs_declared_hardware() {
+        let signing_key =
+            load_signing_key_from_base64_seed("CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=")
+                .unwrap();
+        let capability = create_signed_provider_capability(
+            "provider-a",
+            &signing_key,
+            "aws_g5_xlarge",
+            "NVIDIA A10G",
+            1,
+            24.0,
+            true,
+            false,
+            &[
+                "llm_lora_economics".to_string(),
+                "inference_economics".to_string(),
+            ],
+            &["python3".to_string()],
+            Some("aws-g5-baseline".to_string()),
+            0.25,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(capability.node_id, "provider-a");
+        assert_eq!(capability.gpu_model, "NVIDIA A10G");
+        assert_eq!(capability.supported_job_types.len(), 2);
+        assert_eq!(
+            capability.ed25519_public_key_base64,
+            verifying_key_to_base64(&signing_key.verifying_key())
+        );
+        verify_provider_capability_signature(&capability, &signing_key.verifying_key()).unwrap();
     }
 
     #[test]

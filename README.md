@@ -80,11 +80,14 @@ osciris-node submit-job \
 Run the job as a provider:
 
 ```bash
+printf "%s" "$PROVIDER_SEED" > /run/osciris/provider-a.seed
+chmod 600 /run/osciris/provider-a.seed
+
 osciris-node run-provider \
   --job-spec /tmp/osciris-inference-job.json \
   --provider-id provider-a \
   --signing-key-id provider-a-key \
-  --signing-key-seed-base64 "$PROVIDER_SEED" \
+  --signing-key-seed-file /run/osciris/provider-a.seed \
   --repo-root /absolute/path/to/OSCIRIS \
   --work-root /tmp/osciris-provider-a
 ```
@@ -92,6 +95,14 @@ osciris-node run-provider \
 Multi-machine onboarding:
 
 [docs/multi_host_testnet_join_guide.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/protocol-rs/docs/multi_host_testnet_join_guide.md)
+
+MVP operator path:
+
+[docs/mvp_operator_runbook.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/protocol-rs/docs/mvp_operator_runbook.md)
+
+Horizen testnet integration:
+
+[docs/horizen_mvp_integration.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/protocol-rs/docs/horizen_mvp_integration.md)
 
 ## Related Repos
 

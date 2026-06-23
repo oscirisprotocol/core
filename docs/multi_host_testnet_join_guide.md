@@ -80,6 +80,18 @@ Record from the output:
 - `ed25519_public_key_base64`
 - `peer_id`
 
+For MVP operations, store the seed in a private runtime file and pass
+`--signing-key-seed-file`. Avoid passing seed values directly in shell history
+or process arguments.
+
+```bash
+install -m 700 -d /run/osciris
+printf "%s" "<enterprise-seed>" > /run/osciris/enterprise.seed
+printf "%s" "<provider-seed>" > /run/osciris/provider-a.seed
+printf "%s" "<verifier-seed>" > /run/osciris/verifier-1.seed
+chmod 600 /run/osciris/*.seed
+```
+
 If the role will later submit on-chain actions, rerun with `--evm-private-key-hex`
 or provide a separate EVM wallet during chain registration.
 
@@ -90,7 +102,7 @@ On the enterprise machine:
 ```bash
 osciris-node network serve \
   --work-root /tmp/osciris-enterprise \
-  --signing-key-seed-base64 <enterprise-seed> \
+  --signing-key-seed-file /run/osciris/enterprise.seed \
   --listen-addr /ip4/0.0.0.0/tcp/4101
 ```
 
@@ -106,7 +118,7 @@ osciris-node network run-provider \
   --work-root /tmp/osciris-provider-a \
   --repo-root /absolute/path/to/OSCIRIS \
   --signing-key-id provider-a-key \
-  --signing-key-seed-base64 <provider-seed> \
+  --signing-key-seed-file /run/osciris/provider-a.seed \
   --listen-addr /ip4/0.0.0.0/tcp/4102 \
   --bootstrap-peer <bootstrap-multiaddr>
 ```
@@ -120,7 +132,7 @@ osciris-node network run-verifier \
   --work-root /tmp/osciris-verifier-1 \
   --verifier-id verifier-1 \
   --signing-key-id verifier-1-key \
-  --signing-key-seed-base64 <verifier-seed> \
+  --signing-key-seed-file /run/osciris/verifier-1.seed \
   --listen-addr /ip4/0.0.0.0/tcp/4103 \
   --bootstrap-peer <bootstrap-multiaddr>
 ```
@@ -140,7 +152,7 @@ osciris-node network create-job-announcement \
   --work-root /tmp/osciris-enterprise \
   --job-spec /tmp/osciris-enterprise/job.json \
   --submitter-id enterprise-1 \
-  --signing-key-seed-base64 <enterprise-seed>
+  --signing-key-seed-file /run/osciris/enterprise.seed
 ```
 
 ## 6. Confirm Claims and Assign the Provider
@@ -159,7 +171,7 @@ osciris-node network assign-job \
   --job-id <job-id> \
   --provider-id provider-a \
   --assigner-id enterprise-1 \
-  --signing-key-seed-base64 <enterprise-seed>
+  --signing-key-seed-file /run/osciris/enterprise.seed
 ```
 
 ## 7. Inspect Protocol State
