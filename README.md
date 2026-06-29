@@ -106,8 +106,8 @@ Horizen testnet integration:
 
 ## Related Repos
 
-- DSP engine and benchmarks: [../README.md](../README.md)
-- Horizen testnet contracts: [../contracts/README.md](../contracts/README.md)
+- DSP engine and benchmarks: [oscirisprotocol/dsp](https://github.com/oscirisprotocol/dsp)
+- Horizen testnet contracts: [oscirisprotocol/contracts](https://github.com/oscirisprotocol/contracts)
 
 ## Current Boundary
 
