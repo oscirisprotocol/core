@@ -208,10 +208,12 @@ Horizen testnet integration:
 
 [docs/horizen_mvp_integration.md](docs/horizen_mvp_integration.md)
 
-## Related Repos
+## Related Components
 
-- DSP engine and benchmarks: [../README.md](../README.md)
-- Horizen testnet contracts: [../contracts/README.md](../contracts/README.md)
+- DSP engine and benchmarks: private internal repository, summarized publicly in the
+  [OSCIRIS resources page](https://oscirislabs.com/resources#training-evidence)
+- Horizen testnet contract layer: private internal repository, summarized publicly in the
+  [proof-aware contracts overview](https://oscirislabs.com/resources#proof-aware-contracts)
 
 ## Current Boundary
 
