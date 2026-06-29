@@ -19,14 +19,15 @@ use osciris_chain::{
 };
 use osciris_core::{
     bundle_hash, load_signing_key_from_base64_seed, sha256_file, sign_challenge_record,
-    sign_job_announcement, sign_job_assignment, sign_job_claim, sign_provider_capability,
-    sign_receipt_availability, verify_challenge_record_signature, verify_job_claim_signature,
+    sign_job_announcement, sign_job_assignment, sign_job_claim, sign_milestone_record,
+    sign_provider_capability, sign_receipt_availability, verify_challenge_record_signature,
+    verify_job_claim_signature, verify_milestone_record_signature,
     verify_receipt_availability_signature, verify_verification_receipt_signature,
     verifying_key_from_base64, verifying_key_to_base64, ChainSubmissionStatus, ChallengeReasonCode,
     ChallengeRecord, ChallengeStatus, ExecutionReceipt, JobAnnouncement, JobAssignment, JobClaim,
-    JobSpec, JobType, NodeIdentity, NodeRole, NodeStatus, PeerPresence, PrivacyMode, PrivacyPolicy,
-    ProviderCapability, ReceiptAvailability, ReceiptBundle, VerificationReceipt,
-    VerificationReceiptAnnouncement,
+    JobSpec, JobType, MilestoneRecord, NodeIdentity, NodeRole, NodeStatus, PeerPresence,
+    PrivacyMode, PrivacyPolicy, ProviderCapability, ReceiptAvailability, ReceiptBundle,
+    VerificationReceipt, VerificationReceiptAnnouncement,
 };
 use osciris_node::network::{
     auto_fetch_receipts, fetch_receipt_bundle_p2p, peer_id_from_signing_seed, run_auto_provider,
@@ -41,7 +42,8 @@ use osciris_node::{run_job, ProviderConfig};
 use osciris_verifier::{verify_bundle, verify_bundle_with_chain, VerifierConfig};
 use rand::rngs::OsRng;
 use rand::RngCore;
-use serde::Serialize;
+use semver::Version;
+use serde::{Deserialize, Serialize};
 use tar::Builder;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -250,6 +252,16 @@ enum DemoCommands {
         #[arg(long, default_value_t = false)]
         keep_artifacts: bool,
     },
+    ContributorFlow {
+        #[arg(long)]
+        work_root: Option<PathBuf>,
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        keep_artifacts: bool,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -408,6 +420,22 @@ enum NetworkCommands {
         #[arg(long)]
         claim_json: PathBuf,
     },
+    CreateJobClaim {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        job_id: Uuid,
+        #[arg(long)]
+        provider_id: String,
+        #[arg(long)]
+        signing_key_seed_base64: Option<String>,
+        #[arg(long)]
+        signing_key_seed_file: Option<PathBuf>,
+        #[arg(long)]
+        claim_note: Option<String>,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     Claims {
         #[arg(long)]
         work_root: PathBuf,
@@ -444,6 +472,34 @@ enum NetworkCommands {
         #[arg(long)]
         bundle_uri: Option<String>,
     },
+    PublishMilestone {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        job_id: Uuid,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long = "contributor-node-id")]
+        contributor_node_ids: Vec<String>,
+        #[arg(long)]
+        quality_metric_name: String,
+        #[arg(long)]
+        quality_metric_value: f64,
+        #[arg(long)]
+        publisher_id: String,
+        #[arg(long)]
+        signing_key_id: String,
+        #[arg(long)]
+        signing_key_seed_base64: Option<String>,
+        #[arg(long)]
+        signing_key_seed_file: Option<PathBuf>,
+        #[arg(long)]
+        evidence_dir: Option<PathBuf>,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     ImportReceiptAvailability {
         #[arg(long)]
         work_root: PathBuf,
@@ -453,6 +509,12 @@ enum NetworkCommands {
     Receipts {
         #[arg(long)]
         work_root: PathBuf,
+    },
+    Milestones {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        job_id: Option<Uuid>,
     },
     Verifications {
         #[arg(long)]
@@ -518,6 +580,15 @@ enum NetworkCommands {
         #[arg(long)]
         job_id: Uuid,
     },
+    #[command(about = "Participant-facing workflow snapshot with milestones")]
+    ParticipantStatus {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        job_id: Uuid,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     FetchReceiptBundle {
         #[arg(long)]
         work_root: PathBuf,
@@ -543,6 +614,31 @@ enum NetworkCommands {
         provider_id: String,
         #[arg(long, default_value_t = 30)]
         timeout_seconds: u64,
+    },
+    #[command(
+        alias = "sync-published",
+        about = "Synchronize published bundles for beta collaboration clients"
+    )]
+    SyncPublishedUpdates {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long, default_value = "https://oscirislabs.com")]
+        base_url: String,
+        #[arg(long, default_value_t = 300)]
+        poll_seconds: u64,
+        #[arg(long, default_value_t = false)]
+        watch: bool,
+    },
+    #[command(about = "Check the public beta release manifest for newer OSCIRIS binaries")]
+    CheckUpdates {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long, default_value = "https://oscirislabs.com")]
+        base_url: String,
+        #[arg(long, default_value_t = 300)]
+        poll_seconds: u64,
+        #[arg(long, default_value_t = false)]
+        watch: bool,
     },
     VerifyDiscoveredReceipt {
         #[arg(long)]
@@ -642,6 +738,8 @@ struct LocalSettlementDemoSummary {
     work_root: String,
     repo_root: String,
     kept_artifacts: bool,
+    workflow: String,
+    identity_files: serde_json::Value,
     job_id: Uuid,
     provider_a_executed: bool,
     provider_b_executed: bool,
@@ -664,6 +762,69 @@ struct GeneratedIdentity {
     bootstrap_peers: Vec<String>,
     node_identity: NodeIdentity,
     suggested_commands: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct ContributorGpuPeerDemoSummary {
+    ready: bool,
+    work_root: String,
+    repo_root: String,
+    contributor_manifest: serde_json::Value,
+    settlement: LocalSettlementDemoSummary,
+}
+
+#[derive(Debug, Serialize)]
+struct PublishedUpdateSyncSummary {
+    ready: bool,
+    work_root: String,
+    base_url: String,
+    poll_seconds: u64,
+    watch: bool,
+    sync_count: u64,
+    output_dir: String,
+    participant_status: String,
+    proof_feed: String,
+    contributor_manifest: String,
+    beta_release_manifest: String,
+    last_synced_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BetaReleaseAsset {
+    platform: String,
+    filename: String,
+    url: String,
+    sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BetaReleaseManifest {
+    channel: String,
+    latest_version: String,
+    published_at: String,
+    release_page_url: String,
+    release_notes: String,
+    assets: Vec<BetaReleaseAsset>,
+}
+
+#[derive(Debug, Serialize)]
+struct BetaReleaseCheckSummary {
+    ready: bool,
+    work_root: String,
+    base_url: String,
+    poll_seconds: u64,
+    watch: bool,
+    current_version: String,
+    latest_version: String,
+    update_available: bool,
+    comparison: String,
+    channel: String,
+    release_page_url: String,
+    recommended_platform: Option<String>,
+    recommended_download_url: Option<String>,
+    release_notes: String,
+    beta_release_manifest: String,
+    checked_at: String,
 }
 
 fn main() -> Result<()> {
@@ -693,6 +854,23 @@ fn main() -> Result<()> {
                     work_root,
                     repo_root,
                     keep_artifacts,
+                ))?;
+                print_json(&summary)?;
+                if !summary.ready {
+                    std::process::exit(1);
+                }
+            }
+            DemoCommands::ContributorFlow {
+                work_root,
+                repo_root,
+                keep_artifacts,
+                output,
+            } => {
+                let summary = runtime.block_on(run_contributor_gpu_peer_demo(
+                    work_root,
+                    repo_root,
+                    keep_artifacts,
+                    output,
                 ))?;
                 print_json(&summary)?;
                 if !summary.ready {
@@ -1247,6 +1425,54 @@ fn main() -> Result<()> {
                 runtime.block_on(store.record_job_claim(&claim))?;
                 print_json(&claim)?;
             }
+            NetworkCommands::CreateJobClaim {
+                work_root,
+                job_id,
+                provider_id,
+                signing_key_seed_base64,
+                signing_key_seed_file,
+                claim_note,
+                output,
+            } => {
+                let store = runtime.block_on(ProtocolStore::open(&work_root.join(".osciris")))?;
+                let announcement = runtime
+                    .block_on(store.load_job_announcement(&job_id.to_string()))?
+                    .with_context(|| format!("cannot create a claim for unknown job {job_id}"))?;
+                let capability = runtime
+                    .block_on(store.load_provider_capability(&provider_id))?
+                    .with_context(|| {
+                        format!("cannot create a claim for provider {provider_id}; publish provider capability first")
+                    })?;
+                let signing_key = load_signing_key_from_seed_source(
+                    signing_key_seed_base64,
+                    signing_key_seed_file,
+                )?;
+                let provider_public_key = verifying_key_to_base64(&signing_key.verifying_key());
+                if capability.ed25519_public_key_base64 != provider_public_key {
+                    bail!(
+                        "provider capability public key does not match the supplied signing key for {provider_id}"
+                    );
+                }
+
+                let claim = signed_job_claim_with_note(
+                    &provider_id,
+                    &provider_public_key,
+                    &signing_key,
+                    job_id,
+                    claim_note
+                        .or_else(|| Some(format!("matched {}", announcement.required_capability))),
+                )?;
+                runtime.block_on(store.record_job_claim(&claim))?;
+                if let Some(output) = output {
+                    if let Some(parent) = output.parent() {
+                        fs::create_dir_all(parent)
+                            .with_context(|| format!("failed to create {}", parent.display()))?;
+                    }
+                    fs::write(&output, serde_json::to_vec_pretty(&claim)?)
+                        .with_context(|| format!("failed to write {}", output.display()))?;
+                }
+                print_json(&claim)?;
+            }
             NetworkCommands::Claims { work_root } => {
                 let store = runtime.block_on(ProtocolStore::open(&work_root.join(".osciris")))?;
                 let claims = runtime.block_on(store.list_job_claims())?;
@@ -1350,6 +1576,99 @@ fn main() -> Result<()> {
                 runtime.block_on(store.record_receipt_availability(&availability))?;
                 print_json(&availability)?;
             }
+            NetworkCommands::PublishMilestone {
+                work_root,
+                job_id,
+                title,
+                summary,
+                contributor_node_ids,
+                quality_metric_name,
+                quality_metric_value,
+                publisher_id,
+                signing_key_id,
+                signing_key_seed_base64,
+                signing_key_seed_file,
+                evidence_dir,
+                output,
+            } => {
+                let store = runtime.block_on(ProtocolStore::open(&work_root.join(".osciris")))?;
+                let evidence_dir = evidence_dir.unwrap_or_else(|| {
+                    work_root
+                        .join(".osciris")
+                        .join("evidence")
+                        .join(job_id.to_string())
+                });
+                let execution_receipt_path = evidence_dir.join("execution_receipt.json");
+                let bundle_path = evidence_dir.join("receipt_bundle.json");
+                let execution_receipt: ExecutionReceipt =
+                    serde_json::from_slice(&std::fs::read(&execution_receipt_path).with_context(
+                        || format!("failed to read {}", execution_receipt_path.display()),
+                    )?)?;
+                if execution_receipt.job_id != job_id {
+                    bail!(
+                        "execution receipt job_id {} does not match requested job_id {}",
+                        execution_receipt.job_id,
+                        job_id
+                    );
+                }
+                let bundle: ReceiptBundle = serde_json::from_slice(
+                    &std::fs::read(&bundle_path)
+                        .with_context(|| format!("failed to read {}", bundle_path.display()))?,
+                )?;
+                if bundle.job_id != job_id {
+                    bail!(
+                        "receipt bundle job_id {} does not match requested job_id {}",
+                        bundle.job_id,
+                        job_id
+                    );
+                }
+                let verification_receipts = load_verification_receipts(&evidence_dir)?;
+                if verification_receipts.is_empty() {
+                    bail!(
+                        "no verification receipts found under {}",
+                        evidence_dir.display()
+                    );
+                }
+                let signing_key = load_signing_key_from_seed_source(
+                    signing_key_seed_base64,
+                    signing_key_seed_file,
+                )?;
+                let mut contributor_set = BTreeSet::new();
+                contributor_set.insert(publisher_id.clone());
+                contributor_set.insert(execution_receipt.provider_id.clone());
+                contributor_set.extend(contributor_node_ids);
+                let mut milestone = MilestoneRecord {
+                    milestone_id: Uuid::now_v7(),
+                    job_id,
+                    job_type: execution_receipt.job_type.clone(),
+                    title,
+                    summary,
+                    contributing_node_ids: contributor_set.into_iter().collect(),
+                    quality_metric_name,
+                    quality_metric_value,
+                    evidence_bundle_sha256: bundle.bundle_sha256.clone(),
+                    verification_receipt_sha256_list: bundle
+                        .verification_receipt_sha256_list
+                        .clone(),
+                    published_by: publisher_id,
+                    published_at: Utc::now().to_rfc3339(),
+                    signing_key_id,
+                    signature: String::new(),
+                };
+                milestone.signature = sign_milestone_record(&milestone, &signing_key)?;
+                let verifying_key = signing_key.verifying_key();
+                verify_milestone_record_signature(&milestone, &verifying_key)?;
+                runtime.block_on(store.record_milestone(&milestone))?;
+                if let Some(output) = output {
+                    if let Some(parent) = output.parent() {
+                        fs::create_dir_all(parent)
+                            .with_context(|| format!("failed to create {}", parent.display()))?;
+                    }
+                    fs::write(&output, serde_json::to_vec_pretty(&milestone)?)
+                        .with_context(|| format!("failed to write {}", output.display()))?;
+                }
+                print_json(&milestone)?;
+            }
             NetworkCommands::ImportReceiptAvailability {
                 work_root,
                 availability_json,
@@ -1369,6 +1688,17 @@ fn main() -> Result<()> {
                 let store = runtime.block_on(ProtocolStore::open(&work_root.join(".osciris")))?;
                 let availability = runtime.block_on(store.list_receipt_availability())?;
                 print_json(&availability)?;
+            }
+            NetworkCommands::Milestones { work_root, job_id } => {
+                let store = runtime.block_on(ProtocolStore::open(&work_root.join(".osciris")))?;
+                if let Some(job_id) = job_id {
+                    let milestones =
+                        runtime.block_on(store.load_milestones_by_job(&job_id.to_string()))?;
+                    print_json(&milestones)?;
+                } else {
+                    let milestones = runtime.block_on(store.list_milestones())?;
+                    print_json(&milestones)?;
+                }
             }
             NetworkCommands::Verifications { work_root } => {
                 let store = runtime.block_on(ProtocolStore::open(&work_root.join(".osciris")))?;
@@ -1531,6 +1861,24 @@ fn main() -> Result<()> {
                     "settlement": settlement
                 }))?;
             }
+            NetworkCommands::ParticipantStatus {
+                work_root,
+                job_id,
+                output,
+            } => {
+                let store = runtime.block_on(ProtocolStore::open(&work_root.join(".osciris")))?;
+                let snapshot =
+                    runtime.block_on(build_participant_status_snapshot(&store, job_id))?;
+                if let Some(output) = output {
+                    if let Some(parent) = output.parent() {
+                        fs::create_dir_all(parent)
+                            .with_context(|| format!("failed to create {}", parent.display()))?;
+                    }
+                    fs::write(&output, serde_json::to_vec_pretty(&snapshot)?)
+                        .with_context(|| format!("failed to write {}", output.display()))?;
+                }
+                print_json(&snapshot)?;
+            }
             NetworkCommands::FetchReceiptBundle {
                 work_root,
                 job_id,
@@ -1583,6 +1931,34 @@ fn main() -> Result<()> {
                     timeout: Duration::from_secs(timeout_seconds),
                 }))?;
                 print_json(&fetched)?;
+            }
+            NetworkCommands::SyncPublishedUpdates {
+                work_root,
+                base_url,
+                poll_seconds,
+                watch,
+            } => {
+                let summary = runtime.block_on(sync_published_updates(
+                    work_root,
+                    base_url,
+                    poll_seconds,
+                    watch,
+                ))?;
+                print_json(&summary)?;
+            }
+            NetworkCommands::CheckUpdates {
+                work_root,
+                base_url,
+                poll_seconds,
+                watch,
+            } => {
+                let summary = runtime.block_on(check_beta_release_updates(
+                    work_root,
+                    base_url,
+                    poll_seconds,
+                    watch,
+                ))?;
+                print_json(&summary)?;
             }
             NetworkCommands::VerifyDiscoveredReceipt {
                 work_root,
@@ -1828,6 +2204,221 @@ async fn build_settlement_report(
         chain_submitted,
         Utc::now(),
     ))
+}
+
+async fn build_participant_status_snapshot(
+    store: &ProtocolStore,
+    job_id: Uuid,
+) -> Result<serde_json::Value> {
+    let announcement = store.load_job_announcement(&job_id.to_string()).await?;
+    let job_spec = store.load_job_spec(&job_id.to_string()).await?;
+    let claims = store.load_job_claims_by_job(&job_id.to_string()).await?;
+    let assignment = store.load_job_assignment(&job_id.to_string()).await?;
+    let receipt_availability = store
+        .load_receipt_availability_by_job(&job_id.to_string())
+        .await?;
+    let verification_receipts = store
+        .load_verification_receipts_by_job(&job_id.to_string())
+        .await?;
+    let milestones = store.load_milestones_by_job(&job_id.to_string()).await?;
+    let quorum = build_quorum_report(store, job_id).await?;
+    let challenges = store
+        .load_challenge_records_by_job(&job_id.to_string())
+        .await?;
+    let settlement = build_settlement_report(store, job_id).await?;
+
+    Ok(serde_json::json!({
+        "job_id": job_id,
+        "job_spec": job_spec,
+        "job_announcement": announcement,
+        "claims": claims,
+        "assignment": assignment,
+        "receipt_availability": receipt_availability,
+        "verification_receipts": verification_receipts,
+        "milestones": milestones,
+        "participant_summary": {
+            "job_id": job_id,
+            "claim_count": claims.len(),
+            "assignment_present": assignment.is_some(),
+            "receipt_availability_count": receipt_availability.len(),
+            "verification_receipt_count": verification_receipts.len(),
+            "milestone_count": milestones.len(),
+            "challenge_count": challenges.len(),
+            "quorum_status": quorum.status.clone(),
+            "settlement_lifecycle_state": settlement.lifecycle_state.clone()
+        },
+        "quorum": quorum,
+        "challenges": challenges,
+        "settlement": settlement
+    }))
+}
+
+async fn sync_published_updates(
+    work_root: PathBuf,
+    base_url: String,
+    poll_seconds: u64,
+    watch: bool,
+) -> Result<PublishedUpdateSyncSummary> {
+    let normalized_base_url = base_url.trim_end_matches('/').to_string();
+    let output_dir = work_root.join(".osciris").join("published");
+    fs::create_dir_all(&output_dir)?;
+
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let mut sync_count = 0_u64;
+    let participant_status_path = output_dir.join("participant-status-summary.json");
+    let proof_feed_path = output_dir.join("proof-feed.json");
+    let contributor_manifest_path = output_dir.join("contributor-manifest.json");
+    let beta_release_manifest_path = output_dir.join("beta-release-manifest.json");
+
+    loop {
+        sync_json_bundle(
+            &client,
+            &format!("{normalized_base_url}/participant-status-summary.json"),
+            &participant_status_path,
+        )
+        .await?;
+        sync_json_bundle(
+            &client,
+            &format!("{normalized_base_url}/proof-feed.json"),
+            &proof_feed_path,
+        )
+        .await?;
+        sync_json_bundle(
+            &client,
+            &format!("{normalized_base_url}/contributor-manifest.json"),
+            &contributor_manifest_path,
+        )
+        .await?;
+        sync_json_bundle(
+            &client,
+            &format!("{normalized_base_url}/beta-release-manifest.json"),
+            &beta_release_manifest_path,
+        )
+        .await?;
+
+        sync_count += 1;
+        let last_sync = Utc::now().to_rfc3339();
+
+        let summary = PublishedUpdateSyncSummary {
+            ready: true,
+            work_root: work_root.display().to_string(),
+            base_url: normalized_base_url.clone(),
+            poll_seconds,
+            watch,
+            sync_count,
+            output_dir: output_dir.display().to_string(),
+            participant_status: participant_status_path.display().to_string(),
+            proof_feed: proof_feed_path.display().to_string(),
+            contributor_manifest: contributor_manifest_path.display().to_string(),
+            beta_release_manifest: beta_release_manifest_path.display().to_string(),
+            last_synced_at: last_sync.clone(),
+        };
+
+        if !watch {
+            return Ok(summary);
+        }
+
+        print_json(&summary)?;
+        tokio::time::sleep(Duration::from_secs(poll_seconds.max(1))).await;
+    }
+}
+
+async fn check_beta_release_updates(
+    work_root: PathBuf,
+    base_url: String,
+    poll_seconds: u64,
+    watch: bool,
+) -> Result<BetaReleaseCheckSummary> {
+    let normalized_base_url = base_url.trim_end_matches('/').to_string();
+    let output_dir = work_root.join(".osciris").join("published");
+    fs::create_dir_all(&output_dir)?;
+
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let current_version = Version::parse(env!("CARGO_PKG_VERSION"))?;
+    let beta_release_manifest_path = output_dir.join("beta-release-manifest.json");
+
+    loop {
+        let manifest = fetch_beta_release_manifest(
+            &client,
+            &format!("{normalized_base_url}/beta-release-manifest.json"),
+        )
+        .await?;
+        fs::write(
+            &beta_release_manifest_path,
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+
+        let latest_version = Version::parse(&manifest.latest_version).with_context(|| {
+            format!("invalid beta release version: {}", manifest.latest_version)
+        })?;
+        let recommended_asset = select_beta_release_asset(&manifest);
+        let recommended_download_url = recommended_asset
+            .as_ref()
+            .map(|asset| asset.url.clone())
+            .or_else(|| Some(manifest.release_page_url.clone()));
+
+        let comparison = match latest_version.cmp(&current_version) {
+            std::cmp::Ordering::Greater => "update_available",
+            std::cmp::Ordering::Equal => "current",
+            std::cmp::Ordering::Less => "ahead_of_manifest",
+        }
+        .to_string();
+
+        let summary = BetaReleaseCheckSummary {
+            ready: true,
+            work_root: work_root.display().to_string(),
+            base_url: normalized_base_url.clone(),
+            poll_seconds,
+            watch,
+            current_version: current_version.to_string(),
+            latest_version: latest_version.to_string(),
+            update_available: latest_version > current_version,
+            comparison,
+            channel: manifest.channel.clone(),
+            release_page_url: manifest.release_page_url.clone(),
+            recommended_platform: recommended_asset
+                .as_ref()
+                .map(|asset| asset.platform.clone()),
+            recommended_download_url,
+            release_notes: manifest.release_notes.clone(),
+            beta_release_manifest: beta_release_manifest_path.display().to_string(),
+            checked_at: Utc::now().to_rfc3339(),
+        };
+
+        if !watch {
+            return Ok(summary);
+        }
+
+        print_json(&summary)?;
+        tokio::time::sleep(Duration::from_secs(poll_seconds.max(1))).await;
+    }
+}
+
+async fn fetch_beta_release_manifest(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<BetaReleaseManifest> {
+    let response = client.get(url).send().await?.error_for_status()?;
+    Ok(response.json().await?)
+}
+
+fn select_beta_release_asset(manifest: &BetaReleaseManifest) -> Option<&BetaReleaseAsset> {
+    let target_platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    manifest
+        .assets
+        .iter()
+        .find(|asset| asset.platform == target_platform)
+        .or_else(|| manifest.assets.first())
+}
+
+async fn sync_json_bundle(client: &reqwest::Client, url: &str, output_path: &Path) -> Result<()> {
+    let response = client.get(url).send().await?.error_for_status()?;
+    let value: serde_json::Value = response.json().await?;
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output_path, serde_json::to_vec_pretty(&value)?)?;
+    Ok(())
 }
 
 async fn run_doctor(
@@ -2085,6 +2676,37 @@ async fn run_local_settlement_demo(
         demo_root.join("verification_receipt.json"),
     )?;
 
+    let milestone_bundle: ReceiptBundle =
+        serde_json::from_slice(&fs::read(&output.receipt_bundle_path)?)?;
+    let mut milestone = MilestoneRecord {
+        milestone_id: Uuid::now_v7(),
+        job_id,
+        job_type: job.job_type.clone(),
+        title: "Shared settlement milestone".to_string(),
+        summary: "Provider and verifier peers completed the shared private AI checkpoint."
+            .to_string(),
+        contributing_node_ids: vec![
+            "enterprise-1".to_string(),
+            "provider-a".to_string(),
+            "verifier-1".to_string(),
+        ],
+        quality_metric_name: "quality_retention".to_string(),
+        quality_metric_value: 0.96,
+        evidence_bundle_sha256: milestone_bundle.bundle_sha256.clone(),
+        verification_receipt_sha256_list: milestone_bundle.verification_receipt_sha256_list.clone(),
+        published_by: "enterprise-1".to_string(),
+        published_at: Utc::now().to_rfc3339(),
+        signing_key_id: "enterprise-key".to_string(),
+        signature: String::new(),
+    };
+    milestone.signature = sign_milestone_record(&milestone, &enterprise_signing_key)?;
+    verify_milestone_record_signature(&milestone, &enterprise_signing_key.verifying_key())?;
+    store.record_milestone(&milestone).await?;
+    fs::write(
+        demo_root.join("milestone_record.json"),
+        serde_json::to_vec_pretty(&milestone)?,
+    )?;
+
     let quorum_before_challenge = build_quorum_report(&store, job_id).await?;
     fs::write(
         demo_root.join("quorum_status.json"),
@@ -2157,6 +2779,12 @@ async fn run_local_settlement_demo(
         serde_json::to_vec_pretty(&settlement)?,
     )?;
 
+    let participant_status_json = build_participant_status_snapshot(&store, job_id).await?;
+    fs::write(
+        demo_root.join("participant_status.json"),
+        serde_json::to_vec_pretty(&participant_status_json)?,
+    )?;
+
     let announcement_record = store.load_job_announcement(&job_id.to_string()).await?;
     let job_spec_record = store.load_job_spec(&job_id.to_string()).await?;
     let claim_records = store.load_job_claims_by_job(&job_id.to_string()).await?;
@@ -2197,6 +2825,8 @@ async fn run_local_settlement_demo(
         work_root: work_root.display().to_string(),
         repo_root: repo_root.display().to_string(),
         kept_artifacts: keep_artifacts || work_root.starts_with(env::temp_dir()),
+        workflow: "local_settlement".to_string(),
+        identity_files: serde_json::json!({}),
         job_id,
         provider_a_executed: true,
         provider_b_executed,
@@ -2207,6 +2837,8 @@ async fn run_local_settlement_demo(
             "job_spec": job_spec_path,
             "evidence_dir": output.evidence_dir,
             "verification_receipt_path": verification_output.verification_receipt_path,
+            "milestone_record": demo_root.join("milestone_record.json"),
+            "participant_status": demo_root.join("participant_status.json"),
             "job_status": demo_root.join("job_status.json"),
             "provider_status": demo_root.join("provider_status.json"),
             "quorum_status": demo_root.join("quorum_status.json"),
@@ -2217,6 +2849,109 @@ async fn run_local_settlement_demo(
         demo_root.join("summary.json"),
         serde_json::to_vec_pretty(&summary)?,
     )?;
+    Ok(summary)
+}
+
+async fn run_contributor_gpu_peer_demo(
+    work_root: Option<PathBuf>,
+    repo_root: Option<PathBuf>,
+    keep_artifacts: bool,
+    output: Option<PathBuf>,
+) -> Result<ContributorGpuPeerDemoSummary> {
+    let work_root = work_root
+        .unwrap_or_else(|| env::temp_dir().join(format!("osciris-contributor-{}", Uuid::now_v7())));
+    fs::create_dir_all(&work_root)?;
+    let repo_root = repo_root.unwrap_or_else(|| work_root.clone());
+    let identity_root = work_root.join("demo-identities");
+    fs::create_dir_all(&identity_root)?;
+
+    let enterprise_identity = generate_identity(
+        "enterprise-1".to_string(),
+        "enterprise".to_string(),
+        "Enterprise 1".to_string(),
+        Some(identity_root.join("enterprise")),
+        None,
+        vec![],
+    )
+    .await?;
+    let provider_identity = generate_identity(
+        "provider-a".to_string(),
+        "provider".to_string(),
+        "Provider A".to_string(),
+        Some(identity_root.join("provider-a")),
+        None,
+        vec![],
+    )
+    .await?;
+    let verifier_identity = generate_identity(
+        "verifier-1".to_string(),
+        "verifier".to_string(),
+        "Verifier 1".to_string(),
+        Some(identity_root.join("verifier-1")),
+        None,
+        vec![],
+    )
+    .await?;
+
+    fs::write(
+        identity_root.join("enterprise.json"),
+        serde_json::to_vec_pretty(&enterprise_identity)?,
+    )?;
+    fs::write(
+        identity_root.join("provider-a.json"),
+        serde_json::to_vec_pretty(&provider_identity)?,
+    )?;
+    fs::write(
+        identity_root.join("verifier-1.json"),
+        serde_json::to_vec_pretty(&verifier_identity)?,
+    )?;
+
+    let settlement = run_local_settlement_demo(
+        Some(work_root.clone()),
+        Some(repo_root.clone()),
+        keep_artifacts,
+    )
+    .await?;
+    let manifest = serde_json::json!({
+        "install": "cargo install --path crates/osciris-cli",
+        "identity": {
+            "enterprise": {
+                "node_id": enterprise_identity.node_id,
+                "peer_id": enterprise_identity.peer_id,
+                "identity_json": identity_root.join("enterprise.json")
+            },
+            "provider": {
+                "node_id": provider_identity.node_id,
+                "peer_id": provider_identity.peer_id,
+                "identity_json": identity_root.join("provider-a.json")
+            },
+            "verifier": {
+                "node_id": verifier_identity.node_id,
+                "peer_id": verifier_identity.peer_id,
+                "identity_json": identity_root.join("verifier-1.json")
+            }
+        },
+        "workflow": [
+            "create-provider-capability",
+            "create-job-claim",
+            "run-provider",
+            "create-receipt-availability",
+            "run-verifier",
+            "publish-milestone",
+            "participant-status"
+        ]
+    });
+
+    let summary = ContributorGpuPeerDemoSummary {
+        ready: settlement.ready,
+        work_root: work_root.display().to_string(),
+        repo_root: repo_root.display().to_string(),
+        contributor_manifest: manifest,
+        settlement,
+    };
+    if let Some(output) = output.as_ref() {
+        fs::write(output, serde_json::to_vec_pretty(&summary)?)?;
+    }
     Ok(summary)
 }
 
@@ -2574,12 +3309,28 @@ fn signed_job_claim(
     signing_key: &ed25519_dalek::SigningKey,
     job_id: Uuid,
 ) -> Result<JobClaim> {
+    signed_job_claim_with_note(
+        provider_id,
+        public_key,
+        signing_key,
+        job_id,
+        Some("demo_claim".to_string()),
+    )
+}
+
+fn signed_job_claim_with_note(
+    provider_id: &str,
+    public_key: &str,
+    signing_key: &ed25519_dalek::SigningKey,
+    job_id: Uuid,
+    claim_note: Option<String>,
+) -> Result<JobClaim> {
     let mut claim = JobClaim {
         job_id,
         provider_node_id: provider_id.to_string(),
         provider_ed25519_public_key_base64: public_key.to_string(),
         claimed_at: Utc::now().to_rfc3339(),
-        claim_note: Some("demo_claim".to_string()),
+        claim_note,
         signature: String::new(),
     };
     claim.signature = sign_job_claim(&claim, signing_key)?;
