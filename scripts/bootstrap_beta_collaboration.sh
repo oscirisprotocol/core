@@ -19,9 +19,9 @@ has_local_checkout() {
 install_from_local_checkout() {
   local build_target_dir
 
-  if ! command -v cargo >/dev/null 2>&1; then
-    return 1
-  fi
+if ! command -v cargo >/dev/null 2>&1; then
+  return 1
+fi
 
   if ! has_local_checkout; then
     return 1
@@ -36,6 +36,16 @@ install_from_local_checkout() {
 
   install -m 0755 "${build_target_dir}/release/${BIN_NAME}" "${BIN_PATH}"
   rm -rf "$build_target_dir"
+}
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    return 1
+  fi
 }
 
 download_release_asset() {
@@ -95,6 +105,37 @@ PY
   if ! curl -fsSL "$asset_url" -o "$temp_dir/$asset_filename"; then
     rm -rf "$temp_dir"
     return 1
+  fi
+
+  asset_sha256="$(python3 - "$manifest_json" "$asset_url" <<'PY'
+import json
+import sys
+
+manifest = json.loads(sys.argv[1])
+target_url = sys.argv[2]
+for asset in manifest.get("assets", []):
+    if asset.get("url") == target_url:
+        print(asset.get("sha256") or "")
+        break
+else:
+    print("")
+PY
+)"
+
+  if [[ -n "$asset_sha256" ]]; then
+    if ! checksum_actual="$(sha256_file "$temp_dir/$asset_filename")"; then
+      echo "release asset checksum verification requested but no sha256 tool is available" >&2
+      rm -rf "$temp_dir"
+      return 1
+    fi
+
+    if [[ "$checksum_actual" != "$asset_sha256" ]]; then
+      echo "release asset checksum mismatch for ${asset_filename}" >&2
+      echo "expected: ${asset_sha256}" >&2
+      echo "actual:   ${checksum_actual}" >&2
+      rm -rf "$temp_dir"
+      return 1
+    fi
   fi
 
   if ! tar -xzf "$temp_dir/$asset_filename" -C "$temp_dir"; then

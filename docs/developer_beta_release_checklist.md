@@ -3,6 +3,22 @@
 Use this checklist before publishing a new public `osciris-node` beta build for
 contributors.
 
+Recommended packaging command:
+
+```bash
+bash scripts/package_beta_release.sh \
+  --version 0.1.0 \
+  --channel beta \
+  --release-page-url https://github.com/oscirisprotocol/core/releases/tag/v0.1.0 \
+  --release-notes "Beta collaboration release for colleague onboarding, published bundle sync, and release checks." \
+  --base-download-url https://github.com/oscirisprotocol/core/releases/download/v0.1.0 \
+  --asset macos-aarch64=/absolute/path/to/osciris-node \
+  --asset linux-x86_64=/absolute/path/to/osciris-node
+```
+
+The script emits the release tarballs and a `beta-release-manifest.json` with
+per-asset SHA-256 checksums.
+
 ## Scope
 
 This beta should stay narrowly scoped to the current contributor workflow:
