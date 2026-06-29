@@ -23,6 +23,7 @@ Do not expand the public message beyond the current repo boundary.
 - [ ] GitHub Release assets exist for the intended beta version.
 - [ ] Release notes describe the build as an early developer beta.
 - [ ] Public beta manifest points to the same version and assets.
+- [ ] If release assets are still missing, the repo-checkout bootstrap fallback is verified explicitly.
 - [ ] `osciris-node --version` reports the intended beta version.
 - [ ] macOS install path is verified from the published release binary.
 - [ ] Linux install path is verified from the published release binary.

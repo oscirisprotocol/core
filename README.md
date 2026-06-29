@@ -87,6 +87,11 @@ One-command bootstrap:
 bash scripts/bootstrap_beta_collaboration.sh
 ```
 
+When the published release asset exists, the script installs that binary first.
+If the asset is missing but the script is run from a `protocol-rs` checkout with
+Cargo available, it falls back to a local release build and still completes the
+bundle sync and update check.
+
 ## Quick Start
 
 ```bash

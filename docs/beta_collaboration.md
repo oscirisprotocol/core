@@ -10,6 +10,11 @@ The fastest path is:
 bash scripts/bootstrap_beta_collaboration.sh
 ```
 
+The script prefers the published GitHub release asset referenced by
+`beta-release-manifest.json`. If that asset is temporarily missing but the
+script is run from a `protocol-rs` checkout with Cargo installed, it falls back
+to a local release build and still runs the public sync and update checks.
+
 ## 1. Install a binary
 
 Download the latest release binary from GitHub Releases or build it locally:
