@@ -21,18 +21,23 @@ Usage:
     --version 0.1.0 \
     --release-notes "Beta collaboration release" \
     --asset macos-aarch64=/path/to/osciris-node \
-    [--asset linux-x86_64=/path/to/osciris-node] \
+    --asset linux-x86_64=/path/to/osciris-node \
+    --asset windows-x86_64=/path/to/osciris-node.exe \
     [--channel beta] \
     [--release-repo oscirisprotocol/core] \
     [--target-commit <git-sha>] \
     [--output-dir dist/beta-release] \
     [--website-public-dir /absolute/path/to/OSCIRISLABS/public] \
     [--verify-base-url https://oscirislabs.com] \
+    [--allow-unverified-website-manifest] \
     [--publish-release]
 
 Flags:
   --publish-release             Create or update the GitHub prerelease after packaging.
   --website-public-dir <dir>    Copy beta-release-manifest.json into a website public dir.
+  --allow-unverified-website-manifest
+                                Allow website manifest publication even when the
+                                generated release assets are not yet reachable.
   --verify-base-url <url>       Run verify_beta_release_surface.py against the given base URL.
 EOF
 }
@@ -46,6 +51,9 @@ output_dir="${REPO_ROOT}/dist/beta-release"
 website_public_dir=""
 verify_base_url=""
 publish_release=false
+allow_unverified_website_manifest=false
+website_manifest_verify_attempts=6
+website_manifest_verify_sleep_seconds=5
 declare -a asset_args=()
 
 while [[ $# -gt 0 ]]; do
@@ -85,6 +93,18 @@ while [[ $# -gt 0 ]]; do
     --publish-release)
       publish_release=true
       shift
+      ;;
+    --allow-unverified-website-manifest)
+      allow_unverified_website_manifest=true
+      shift
+      ;;
+    --website-manifest-verify-attempts)
+      website_manifest_verify_attempts="$2"
+      shift 2
+      ;;
+    --website-manifest-verify-sleep-seconds)
+      website_manifest_verify_sleep_seconds="$2"
+      shift 2
       ;;
     --asset)
       asset_args+=("$2")
@@ -176,9 +196,40 @@ if [[ "$publish_release" == true ]]; then
 fi
 
 if [[ -n "$website_public_dir" ]]; then
+  generated_manifest_ok=true
+  generated_verify_output="$(mktemp)"
+  generated_manifest_ok=false
+  for ((attempt = 1; attempt <= website_manifest_verify_attempts; attempt++)); do
+    if python3 "${REPO_ROOT}/scripts/verify_beta_release_surface.py" \
+      --base-url "file://${output_dir}" \
+      --release-manifest-only \
+      --output "$generated_verify_output" >/dev/null; then
+      generated_manifest_ok=true
+      break
+    fi
+
+    if (( attempt < website_manifest_verify_attempts )); then
+      sleep "$website_manifest_verify_sleep_seconds"
+    fi
+  done
+
+  if [[ "$generated_manifest_ok" != true && "$allow_unverified_website_manifest" != true ]]; then
+    echo "Refusing to publish beta-release-manifest.json to ${website_public_dir}." >&2
+    echo "The generated manifest references release assets that did not pass verification." >&2
+    echo "Publish the GitHub release assets first, or rerun with --allow-unverified-website-manifest for the source-fallback path." >&2
+    echo "Generated verification summary: ${generated_verify_output}" >&2
+    exit 1
+  fi
+
   mkdir -p "$website_public_dir"
   cp "$manifest_path" "${website_public_dir%/}/beta-release-manifest.json"
   echo "Copied manifest to ${website_public_dir%/}/beta-release-manifest.json"
+  if [[ "$generated_manifest_ok" != true ]]; then
+    echo "Warning: published website manifest without verified release assets because --allow-unverified-website-manifest was set." >&2
+    echo "Generated verification summary: ${generated_verify_output}" >&2
+  else
+    rm -f "$generated_verify_output"
+  fi
 fi
 
 if [[ -n "$verify_base_url" ]]; then

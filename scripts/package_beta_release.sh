@@ -39,6 +39,50 @@ sha256_file() {
   fi
 }
 
+create_deterministic_tarball() {
+  python3 - "$1" "$2" <<'PY'
+import gzip
+import io
+import tarfile
+from pathlib import Path
+import sys
+
+binary_path = Path(sys.argv[1])
+archive_path = Path(sys.argv[2])
+payload = binary_path.read_bytes()
+
+with archive_path.open("wb") as raw_file:
+    with gzip.GzipFile(filename="", mode="wb", fileobj=raw_file, mtime=0) as gz_file:
+        with tarfile.open(fileobj=gz_file, mode="w") as archive:
+            info = tarfile.TarInfo(name="osciris-node")
+            info.size = len(payload)
+            info.mode = 0o755
+            info.mtime = 0
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            archive.addfile(info, io.BytesIO(payload))
+PY
+}
+
+create_deterministic_zip() {
+  python3 - "$1" "$2" <<'PY'
+from pathlib import Path
+import sys
+import zipfile
+
+binary_path = Path(sys.argv[1])
+archive_path = Path(sys.argv[2])
+info = zipfile.ZipInfo("osciris-node.exe", date_time=(1980, 1, 1, 0, 0, 0))
+info.compress_type = zipfile.ZIP_DEFLATED
+info.external_attr = 0o755 << 16
+
+with zipfile.ZipFile(archive_path, "w") as archive:
+    archive.writestr(info, binary_path.read_bytes())
+PY
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -50,12 +94,13 @@ Usage:
     --base-download-url https://github.com/oscirisprotocol/core/releases/download/v0.1.0 \
     --asset macos-aarch64=/path/to/osciris-node \
     [--asset linux-x86_64=/path/to/osciris-node] \
+    [--asset windows-x86_64=/path/to/osciris-node.exe] \
     [--output-dir /tmp/osciris-release] \
     [--manifest-out /tmp/osciris-release/beta-release-manifest.json]
 
 Flags:
   --asset <platform>=<binary-path>  Add one packaged asset. Repeat for each platform.
-  --output-dir <dir>                Directory for generated tarballs. Default: dist/beta-release
+  --output-dir <dir>                Directory for generated release archives. Default: dist/beta-release
   --manifest-out <path>             Manifest JSON output path. Default: <output-dir>/beta-release-manifest.json
   --published-at <iso8601>          Explicit manifest published timestamp. Default: current UTC.
 EOF
@@ -165,13 +210,23 @@ for spec in "${asset_args[@]}"; do
     exit 1
   fi
 
-  filename="osciris-node-${platform}.tar.gz"
+  if [[ "$platform" == windows-* ]]; then
+    filename="osciris-node-${platform}.zip"
+    binary_name="osciris-node.exe"
+  else
+    filename="osciris-node-${platform}.tar.gz"
+    binary_name="osciris-node"
+  fi
   tar_root="${release_tmp}/${platform}"
   mkdir -p "$tar_root"
-  install -m 0755 "$binary_path" "${tar_root}/osciris-node"
+  install -m 0755 "$binary_path" "${tar_root}/${binary_name}"
 
   archive_path="${output_dir}/${filename}"
-  COPYFILE_DISABLE=1 tar -czf "$archive_path" -C "$tar_root" osciris-node
+  if [[ "$platform" == windows-* ]]; then
+    create_deterministic_zip "${tar_root}/${binary_name}" "$archive_path"
+  else
+    create_deterministic_tarball "${tar_root}/${binary_name}" "$archive_path"
+  fi
   checksum="$(sha256_file "$archive_path")"
 
   python3 - "$platform" "$filename" "${base_download_url}/${filename}" "$checksum" >> "$manifest_jsonl" <<'PY'

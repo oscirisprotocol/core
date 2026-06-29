@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            platform: macos-aarch64
+            binary: osciris-node
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+            binary: osciris-node
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+            binary: osciris-node.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --locked --release -p osciris-cli --bin osciris-node --target ${{ matrix.target }}
+
+      - name: Stage release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-binaries
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "release-binaries/${{ matrix.binary }}"
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: release-binaries/${{ matrix.binary }}
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download release binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: release-binaries
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          bash scripts/package_beta_release.sh \
+            --version "$version" \
+            --channel beta \
+            --release-page-url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" \
+            --release-notes "OSCIRIS Developer Beta ${GITHUB_REF_NAME}" \
+            --base-download-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}" \
+            --asset "macos-aarch64=${PWD}/release-binaries/macos-aarch64/osciris-node" \
+            --asset "linux-x86_64=${PWD}/release-binaries/linux-x86_64/osciris-node" \
+            --asset "windows-x86_64=${PWD}/release-binaries/windows-x86_64/osciris-node.exe"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: true
+          files: |
+            dist/beta-release/osciris-node-macos-aarch64.tar.gz
+            dist/beta-release/osciris-node-linux-x86_64.tar.gz
+            dist/beta-release/osciris-node-windows-x86_64.zip
+            dist/beta-release/beta-release-manifest.json

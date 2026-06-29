@@ -2403,12 +2403,21 @@ async fn fetch_beta_release_manifest(
 }
 
 fn select_beta_release_asset(manifest: &BetaReleaseManifest) -> Option<&BetaReleaseAsset> {
-    let target_platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let target_platform = current_beta_platform_key();
     manifest
         .assets
         .iter()
         .find(|asset| asset.platform == target_platform)
-        .or_else(|| manifest.assets.first())
+}
+
+fn current_beta_platform_key() -> String {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "macos-aarch64".to_string(),
+        ("macos", "x86_64") => "macos-x86_64".to_string(),
+        ("linux", "x86_64") => "linux-x86_64".to_string(),
+        ("windows", "x86_64") => "windows-x86_64".to_string(),
+        (os, arch) => format!("{os}-{arch}"),
+    }
 }
 
 async fn sync_json_bundle(client: &reqwest::Client, url: &str, output_path: &Path) -> Result<()> {

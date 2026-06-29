@@ -38,6 +38,9 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             archive_name: osciris-node-aarch64-apple-darwin.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive_name: osciris-node-windows-x86_64.zip
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,8 +61,13 @@ jobs:
           set -euo pipefail
           staging_dir="release-${{ matrix.target }}"
           mkdir -p "$staging_dir"
-          cp "target/${{ matrix.target }}/release/osciris-node" "$staging_dir/osciris-node"
-          tar -C "$staging_dir" -czf "${{ matrix.archive_name }}" osciris-node
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            cp "target/${{ matrix.target }}/release/osciris-node.exe" "$staging_dir/osciris-node.exe"
+            powershell Compress-Archive -Path "$staging_dir/osciris-node.exe" -DestinationPath "${{ matrix.archive_name }}"
+          else
+            cp "target/${{ matrix.target }}/release/osciris-node" "$staging_dir/osciris-node"
+            tar -C "$staging_dir" -czf "${{ matrix.archive_name }}" osciris-node
+          fi
           python3 - <<'PY'
           import hashlib
           from pathlib import Path
@@ -98,14 +106,15 @@ jobs:
           generate_release_notes: true
           files: |
             release-artifacts/**/*.tar.gz
+            release-artifacts/**/*.zip
             release-artifacts/**/*.sha256
 ```
 
 ## Verification after maintainer apply
 
 - push a beta tag such as `v0.1.0`
-- confirm the workflow builds Linux and macOS release artifacts
-- confirm the GitHub Release includes `.tar.gz` and `.sha256` files
+- confirm the workflow builds Linux, macOS, and Windows release artifacts
+- confirm the GitHub Release includes Unix `.tar.gz`, Windows `.zip`, and `.sha256` files
 - confirm `OSCIRISLABS/public/beta-release-manifest.json` points to the same version
   and asset names as the GitHub Release
 - keep `dist/beta-release/` local only; it is a generated staging directory for

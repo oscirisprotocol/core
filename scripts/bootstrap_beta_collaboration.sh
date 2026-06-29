@@ -12,6 +12,13 @@ REPO_ROOT="${OSCIRIS_REPO_ROOT:-$DEFAULT_REPO_ROOT}"
 
 mkdir -p "$WORK_ROOT" "$INSTALL_DIR"
 
+case "$(uname -s 2>/dev/null || true)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "Use scripts/bootstrap_beta_collaboration.ps1 for native Windows installs." >&2
+    exit 1
+    ;;
+esac
+
 has_local_checkout() {
   [[ -f "${REPO_ROOT}/Cargo.toml" && -f "${REPO_ROOT}/crates/osciris-cli/Cargo.toml" ]]
 }
@@ -73,16 +80,25 @@ else:
 
 assets = manifest.get("assets", [])
 selected = next((asset for asset in assets if asset.get("platform") == platform_key), None)
-if selected is None and assets:
-    selected = assets[0]
 
 if selected is None:
+    available = sorted(
+        asset.get("platform")
+        for asset in assets
+        if isinstance(asset, dict) and isinstance(asset.get("platform"), str) and asset.get("platform")
+    )
+    if available:
+        raise SystemExit(
+            "beta manifest does not list a downloadable asset for "
+            f"{platform_key}; available platforms: {', '.join(available)}"
+        )
     raise SystemExit("beta manifest does not list any downloadable assets")
 
 print(selected["url"])
 print(selected["filename"])
 PY
   then
+    cat "$temp_dir/asset-info.txt" >&2 || true
     rm -rf "$temp_dir"
     return 1
   fi

@@ -11,6 +11,7 @@ import tarfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,12 @@ REQUIRED_ENDPOINTS = [
         "beta-release-manifest.json",
         ("channel", "latest_version", "published_at", "release_page_url", "release_notes", "assets"),
     ),
+]
+
+DEFAULT_REQUIRED_PLATFORMS = [
+    "macos-aarch64",
+    "linux-x86_64",
+    "windows-x86_64",
 ]
 
 
@@ -47,8 +54,18 @@ class AssetCheck:
     bytes: int | None = None
     sha256_expected: str | None = None
     sha256_actual: str | None = None
+    archive_format: str | None = None
     tar_members: list[str] = field(default_factory=list)
     error: str | None = None
+
+
+@dataclass
+class PlatformCoverageCheck:
+    required: list[str]
+    present: list[str]
+    missing: list[str] = field(default_factory=list)
+    duplicates: list[str] = field(default_factory=list)
+    ok: bool = True
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,6 +92,23 @@ def parse_args() -> argparse.Namespace:
         default=30.0,
         help="HTTP timeout for each request. Default: 30.",
     )
+    parser.add_argument(
+        "--require-platform",
+        action="append",
+        dest="required_platforms",
+        help=(
+            "Required asset platform key. Repeat for multiple values. "
+            "Defaults to macos-aarch64, linux-x86_64, and windows-x86_64."
+        ),
+    )
+    parser.add_argument(
+        "--release-manifest-only",
+        action="store_true",
+        help=(
+            "Verify only beta-release-manifest.json, its release page, and asset set. "
+            "Skip the other public website JSON endpoints."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -90,8 +124,15 @@ def fetch_bytes(url: str, timeout_seconds: float) -> tuple[int, bytes]:
             context = ssl.create_default_context()
 
     with urllib.request.urlopen(request, timeout=timeout_seconds, context=context) as response:
-        status = getattr(response, "status", None) or response.getcode()
-        return int(status), response.read()
+        payload = response.read()
+        status = getattr(response, "status", None)
+        if status is None:
+            getcode = getattr(response, "getcode", None)
+            if callable(getcode):
+                status = getcode()
+        if status is None:
+            status = 200
+        return int(status), payload
 
 
 def ensure_mapping(value: Any, path: str) -> dict[str, Any]:
@@ -238,10 +279,45 @@ def verify_asset(asset: dict[str, Any], timeout_seconds: float, allow_missing_sh
             error="asset sha256 mismatch",
         )
 
-    try:
-        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
-            members = [member.name for member in archive.getmembers() if member.isfile()]
-    except tarfile.TarError as exc:
+    if filename.endswith(".tar.gz"):
+        archive_format = "tar.gz"
+        expected_member = "osciris-node"
+        try:
+            with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+                members = [member.name for member in archive.getmembers() if member.isfile()]
+        except tarfile.TarError as exc:
+            return AssetCheck(
+                platform=platform,
+                filename=filename,
+                url=url,
+                ok=False,
+                status_code=status_code,
+                bytes=len(payload),
+                sha256_expected=sha256_expected,
+                sha256_actual=sha256_actual,
+                archive_format=archive_format,
+                error=f"invalid tar.gz asset: {exc}",
+            )
+    elif filename.endswith(".zip"):
+        archive_format = "zip"
+        expected_member = "osciris-node.exe"
+        try:
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                members = [info.filename for info in archive.infolist() if not info.is_dir()]
+        except zipfile.BadZipFile as exc:
+            return AssetCheck(
+                platform=platform,
+                filename=filename,
+                url=url,
+                ok=False,
+                status_code=status_code,
+                bytes=len(payload),
+                sha256_expected=sha256_expected,
+                sha256_actual=sha256_actual,
+                archive_format=archive_format,
+                error=f"invalid zip asset: {exc}",
+            )
+    else:
         return AssetCheck(
             platform=platform,
             filename=filename,
@@ -251,10 +327,10 @@ def verify_asset(asset: dict[str, Any], timeout_seconds: float, allow_missing_sh
             bytes=len(payload),
             sha256_expected=sha256_expected,
             sha256_actual=sha256_actual,
-            error=f"invalid tar.gz asset: {exc}",
+            error="unsupported asset archive format",
         )
 
-    if "osciris-node" not in members:
+    if expected_member not in members:
         return AssetCheck(
             platform=platform,
             filename=filename,
@@ -264,8 +340,9 @@ def verify_asset(asset: dict[str, Any], timeout_seconds: float, allow_missing_sh
             bytes=len(payload),
             sha256_expected=sha256_expected,
             sha256_actual=sha256_actual,
+            archive_format=archive_format,
             tar_members=members,
-            error="archive does not contain osciris-node",
+            error=f"archive does not contain {expected_member}",
         )
 
     return AssetCheck(
@@ -277,15 +354,51 @@ def verify_asset(asset: dict[str, Any], timeout_seconds: float, allow_missing_sh
         bytes=len(payload),
         sha256_expected=sha256_expected,
         sha256_actual=sha256_actual,
+        archive_format=archive_format,
         tar_members=members,
+    )
+
+
+def verify_platform_coverage(
+    manifest: dict[str, Any],
+    required_platforms: list[str],
+) -> PlatformCoverageCheck:
+    assets = manifest.get("assets", [])
+    present: list[str] = []
+    duplicates: list[str] = []
+    seen: set[str] = set()
+
+    if isinstance(assets, list):
+        for asset in assets:
+            if isinstance(asset, dict):
+                platform = asset.get("platform")
+                if isinstance(platform, str) and platform:
+                    present.append(platform)
+                    if platform in seen and platform not in duplicates:
+                        duplicates.append(platform)
+                    seen.add(platform)
+
+    missing = [platform for platform in required_platforms if platform not in seen]
+    return PlatformCoverageCheck(
+        required=required_platforms,
+        present=present,
+        missing=missing,
+        duplicates=duplicates,
+        ok=not missing and not duplicates,
     )
 
 
 def build_summary(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
     endpoint_results: list[EndpointCheck] = []
     endpoint_payloads: dict[str, dict[str, Any]] = {}
+    required_platforms = args.required_platforms or list(DEFAULT_REQUIRED_PLATFORMS)
+    endpoint_specs = (
+        [item for item in REQUIRED_ENDPOINTS if item[0] == "beta-release-manifest.json"]
+        if args.release_manifest_only
+        else REQUIRED_ENDPOINTS
+    )
 
-    for path, required_keys in REQUIRED_ENDPOINTS:
+    for path, required_keys in endpoint_specs:
         result, payload = verify_json_endpoint(
             args.base_url,
             path,
@@ -304,7 +417,15 @@ def build_summary(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
     )
 
     asset_results: list[AssetCheck] = []
+    platform_coverage = PlatformCoverageCheck(
+        required=required_platforms,
+        present=[],
+        missing=list(required_platforms),
+        duplicates=[],
+        ok=False,
+    )
     if manifest is not None:
+        platform_coverage = verify_platform_coverage(manifest, required_platforms)
         assets = manifest.get("assets")
         if isinstance(assets, list):
             for asset in assets:
@@ -326,13 +447,17 @@ def build_summary(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
     success = all(result.ok for result in endpoint_results)
     success = success and bool(asset_results) and all(result.ok for result in asset_results)
     success = success and bool(release_page.get("ok"))
+    success = success and platform_coverage.ok
 
     summary = {
         "ok": success,
         "base_url": args.base_url.rstrip("/"),
         "allow_missing_sha256": args.allow_missing_sha256,
+        "required_platforms": required_platforms,
+        "release_manifest_only": args.release_manifest_only,
         "endpoints": [asdict(result) for result in endpoint_results],
         "release_page": release_page,
+        "platform_coverage": asdict(platform_coverage),
         "assets": [asdict(result) for result in asset_results],
     }
     return summary, success

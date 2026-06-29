@@ -10,6 +10,12 @@ The fastest path is:
 bash scripts/bootstrap_beta_collaboration.sh
 ```
 
+On Windows PowerShell, use:
+
+```powershell
+.\scripts\bootstrap_beta_collaboration.ps1
+```
+
 The script prefers the published GitHub release asset referenced by
 `beta-release-manifest.json`. If that asset is temporarily missing but the
 script is run from a `protocol-rs` checkout with Cargo installed, it falls back
@@ -47,6 +53,18 @@ osciris-node network check-updates \
 
 The command compares the installed CLI version to the public beta manifest
 and reports the matching release asset when an update exists.
+
+On Windows, use a normal writable path for `--work-root`, for example:
+
+```powershell
+.\osciris-node.exe network sync-published `
+  --work-root "$env:TEMP\osciris-client" `
+  --base-url https://oscirislabs.com
+
+.\osciris-node.exe network check-updates `
+  --work-root "$env:TEMP\osciris-client" `
+  --base-url https://oscirislabs.com
+```
 
 ## 4. Join the collaborative workflow
 
