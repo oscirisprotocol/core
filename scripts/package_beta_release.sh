@@ -171,7 +171,7 @@ for spec in "${asset_args[@]}"; do
   install -m 0755 "$binary_path" "${tar_root}/osciris-node"
 
   archive_path="${output_dir}/${filename}"
-  tar -czf "$archive_path" -C "$tar_root" osciris-node
+  COPYFILE_DISABLE=1 tar -czf "$archive_path" -C "$tar_root" osciris-node
   checksum="$(sha256_file "$archive_path")"
 
   python3 - "$platform" "$filename" "${base_download_url}/${filename}" "$checksum" >> "$manifest_jsonl" <<'PY'

@@ -19,6 +19,21 @@ bash scripts/package_beta_release.sh \
 The script emits the release tarballs and a `beta-release-manifest.json` with
 per-asset SHA-256 checksums.
 
+Recommended release-surface verification command:
+
+```bash
+python3 scripts/verify_beta_release_surface.py \
+  --base-url https://oscirislabs.com
+```
+
+The verifier checks:
+
+- published JSON bundle endpoints
+- GitHub release page reachability
+- release asset URL reachability
+- tarball shape
+- asset SHA-256 integrity against the manifest
+
 ## Scope
 
 This beta should stay narrowly scoped to the current contributor workflow:
@@ -39,6 +54,7 @@ Do not expand the public message beyond the current repo boundary.
 - [ ] GitHub Release assets exist for the intended beta version.
 - [ ] Release notes describe the build as an early developer beta.
 - [ ] Public beta manifest points to the same version and assets.
+- [ ] `python3 scripts/verify_beta_release_surface.py --base-url https://oscirislabs.com` passes.
 - [ ] If release assets are still missing, the repo-checkout bootstrap fallback is verified explicitly.
 - [ ] `osciris-node --version` reports the intended beta version.
 - [ ] macOS install path is verified from the published release binary.
