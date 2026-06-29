@@ -19,6 +19,14 @@ bash scripts/package_beta_release.sh \
 The script emits the release tarballs and a `beta-release-manifest.json` with
 per-asset SHA-256 checksums.
 
+Default local output:
+
+- `dist/beta-release/osciris-node-<platform>.tar.gz`
+- `dist/beta-release/beta-release-manifest.json`
+
+These are generated local release artifacts. They are used by the website
+publisher when present, but they should not be committed to the repository.
+
 Recommended release-surface verification command:
 
 ```bash
@@ -33,6 +41,18 @@ The verifier checks:
 - release asset URL reachability
 - tarball shape
 - asset SHA-256 integrity against the manifest
+
+Recommended publication sequence:
+
+1. Build the release binary or binaries locally.
+2. Run `bash scripts/package_beta_release.sh ...` to generate the tarball(s) and
+   manifest under `dist/beta-release/`.
+3. Upload the tarball(s) to the matching GitHub prerelease.
+4. Confirm `gh release view <tag>` shows the same asset names.
+5. Republish the OSCIRIS Labs public bundle so `public/beta-release-manifest.json`
+   is copied from the generated manifest rather than inferred from placeholder
+   asset names.
+6. Run `python3 scripts/verify_beta_release_surface.py --base-url https://oscirislabs.com`.
 
 ## Scope
 

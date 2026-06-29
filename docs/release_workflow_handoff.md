@@ -107,3 +107,6 @@ jobs:
 - confirm the workflow builds Linux and macOS release artifacts
 - confirm the GitHub Release includes `.tar.gz` and `.sha256` files
 - confirm `OSCIRISLABS/public/beta-release-manifest.json` points to the same version
+  and asset names as the GitHub Release
+- keep `dist/beta-release/` local only; it is a generated staging directory for
+  release packaging and website republish, not a committed artifact path
