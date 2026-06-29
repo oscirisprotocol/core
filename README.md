@@ -94,20 +94,20 @@ osciris-node run-provider \
 
 Multi-machine onboarding:
 
-[docs/multi_host_testnet_join_guide.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/protocol-rs/docs/multi_host_testnet_join_guide.md)
+[docs/multi_host_testnet_join_guide.md](docs/multi_host_testnet_join_guide.md)
 
 MVP operator path:
 
-[docs/mvp_operator_runbook.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/protocol-rs/docs/mvp_operator_runbook.md)
+[docs/mvp_operator_runbook.md](docs/mvp_operator_runbook.md)
 
 Horizen testnet integration:
 
-[docs/horizen_mvp_integration.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/protocol-rs/docs/horizen_mvp_integration.md)
+[docs/horizen_mvp_integration.md](docs/horizen_mvp_integration.md)
 
 ## Related Repos
 
-- DSP engine and benchmarks: [../README.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/README.md)
-- Horizen testnet contracts: [../contracts/README.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/contracts/README.md)
+- DSP engine and benchmarks: [../README.md](../README.md)
+- Horizen testnet contracts: [../contracts/README.md](../contracts/README.md)
 
 ## Current Boundary
 
