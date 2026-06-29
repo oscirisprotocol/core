@@ -365,6 +365,24 @@ pub struct SettlementRecord {
     pub settled_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MilestoneRecord {
+    pub milestone_id: Uuid,
+    pub job_id: Uuid,
+    pub job_type: JobType,
+    pub title: String,
+    pub summary: String,
+    pub contributing_node_ids: Vec<String>,
+    pub quality_metric_name: String,
+    pub quality_metric_value: f64,
+    pub evidence_bundle_sha256: String,
+    pub verification_receipt_sha256_list: Vec<String>,
+    pub published_by: String,
+    pub published_at: String,
+    pub signing_key_id: String,
+    pub signature: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandMetadata {
     pub command: String,
@@ -622,6 +640,31 @@ pub fn verify_receipt_availability_signature(
         .map_err(|_| CoreError::SignatureVerification)
 }
 
+pub fn sign_milestone_record(
+    milestone: &MilestoneRecord,
+    signing_key: &SigningKey,
+) -> Result<String, CoreError> {
+    let mut unsigned = milestone.clone();
+    unsigned.signature.clear();
+    let bytes = canonical_json_bytes(&unsigned)?;
+    Ok(BASE64.encode(signing_key.sign(&bytes).to_bytes()))
+}
+
+pub fn verify_milestone_record_signature(
+    milestone: &MilestoneRecord,
+    verifying_key: &VerifyingKey,
+) -> Result<(), CoreError> {
+    let signature = BASE64.decode(&milestone.signature)?;
+    let signature =
+        Signature::from_slice(&signature).map_err(|_| CoreError::SignatureVerification)?;
+    let mut unsigned = milestone.clone();
+    unsigned.signature.clear();
+    let bytes = canonical_json_bytes(&unsigned)?;
+    verifying_key
+        .verify(&bytes, &signature)
+        .map_err(|_| CoreError::SignatureVerification)
+}
+
 pub fn sign_challenge_record(
     challenge: &ChallengeRecord,
     signing_key: &SigningKey,
@@ -779,6 +822,31 @@ mod tests {
 
         receipt.signature = sign_verification_receipt(&receipt, &signing_key).unwrap();
         verify_verification_receipt_signature(&receipt, &verifying_key).unwrap();
+    }
+
+    #[test]
+    fn milestone_record_signature_round_trips() {
+        let signing_key = SigningKey::from_bytes(&[12_u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let mut milestone = MilestoneRecord {
+            milestone_id: Uuid::now_v7(),
+            job_id: Uuid::now_v7(),
+            job_type: JobType::InferenceEconomics,
+            title: "Community inference milestone".to_string(),
+            summary: "Peers published a shared benchmark checkpoint.".to_string(),
+            contributing_node_ids: vec!["provider-a".to_string(), "verifier-1".to_string()],
+            quality_metric_name: "quality_retention".to_string(),
+            quality_metric_value: 0.91,
+            evidence_bundle_sha256: "bundle".to_string(),
+            verification_receipt_sha256_list: vec!["receipt".to_string()],
+            published_by: "enterprise-1".to_string(),
+            published_at: "2026-06-04T00:03:00Z".to_string(),
+            signing_key_id: "enterprise-key".to_string(),
+            signature: String::new(),
+        };
+
+        milestone.signature = sign_milestone_record(&milestone, &signing_key).unwrap();
+        verify_milestone_record_signature(&milestone, &verifying_key).unwrap();
     }
 
     #[test]

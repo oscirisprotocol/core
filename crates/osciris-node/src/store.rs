@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use chrono::Utc;
 use osciris_core::{
     canonical_json_sha256, ChainSubmissionStatus, ChallengeRecord, ExecutionReceipt,
-    JobAnnouncement, JobAssignment, JobClaim, JobSpec, NodeIdentity, PeerPresence,
+    JobAnnouncement, JobAssignment, JobClaim, JobSpec, MilestoneRecord, NodeIdentity, PeerPresence,
     ProviderCapability, ReceiptAvailability, ReceiptBundle, VerificationReceipt,
 };
 use serde_json::Value;
@@ -95,6 +95,19 @@ pub struct StoredVerificationReceipt {
     pub receipt_sha256: String,
     pub bundle_sha256: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StoredMilestoneRecord {
+    pub milestone_id: String,
+    pub job_id: String,
+    pub job_type: String,
+    pub title: String,
+    pub quality_metric_name: String,
+    pub quality_metric_value: f64,
+    pub evidence_bundle_sha256: String,
+    pub published_by: String,
+    pub published_at: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -423,6 +436,136 @@ impl ProtocolStore {
                 })
             })
             .collect::<Result<Vec<_>>>()
+    }
+
+    pub async fn record_milestone(&self, milestone: &MilestoneRecord) -> Result<()> {
+        let milestone_json = serde_json::to_string(milestone)?;
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO milestones (
+                milestone_id,
+                job_id,
+                job_type,
+                title,
+                summary,
+                contributing_node_ids_json,
+                quality_metric_name,
+                quality_metric_value,
+                evidence_bundle_sha256,
+                verification_receipt_sha256_list_json,
+                published_by,
+                published_at,
+                signing_key_id,
+                signature,
+                milestone_json,
+                created_at,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)
+            ON CONFLICT(milestone_id) DO UPDATE SET
+                job_id = excluded.job_id,
+                job_type = excluded.job_type,
+                title = excluded.title,
+                summary = excluded.summary,
+                contributing_node_ids_json = excluded.contributing_node_ids_json,
+                quality_metric_name = excluded.quality_metric_name,
+                quality_metric_value = excluded.quality_metric_value,
+                evidence_bundle_sha256 = excluded.evidence_bundle_sha256,
+                verification_receipt_sha256_list_json = excluded.verification_receipt_sha256_list_json,
+                published_by = excluded.published_by,
+                published_at = excluded.published_at,
+                signing_key_id = excluded.signing_key_id,
+                signature = excluded.signature,
+                milestone_json = excluded.milestone_json,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(milestone.milestone_id.to_string())
+        .bind(milestone.job_id.to_string())
+        .bind(enum_label(&milestone.job_type)?)
+        .bind(&milestone.title)
+        .bind(&milestone.summary)
+        .bind(serde_json::to_string(&milestone.contributing_node_ids)?)
+        .bind(&milestone.quality_metric_name)
+        .bind(milestone.quality_metric_value)
+        .bind(&milestone.evidence_bundle_sha256)
+        .bind(serde_json::to_string(&milestone.verification_receipt_sha256_list)?)
+        .bind(&milestone.published_by)
+        .bind(&milestone.published_at)
+        .bind(&milestone.signing_key_id)
+        .bind(&milestone.signature)
+        .bind(milestone_json)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn load_milestone(&self, milestone_id: &str) -> Result<Option<MilestoneRecord>> {
+        let row = sqlx::query(
+            r#"
+            SELECT milestone_json
+            FROM milestones
+            WHERE milestone_id = ?1
+            "#,
+        )
+        .bind(milestone_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        Ok(Some(serde_json::from_str(
+            row.get::<String, _>("milestone_json").as_str(),
+        )?))
+    }
+
+    pub async fn load_milestones_by_job(&self, job_id: &str) -> Result<Vec<MilestoneRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT milestone_json
+            FROM milestones
+            WHERE job_id = ?1
+            ORDER BY published_at DESC, milestone_id ASC
+            "#,
+        )
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                serde_json::from_str::<MilestoneRecord>(
+                    row.get::<String, _>("milestone_json").as_str(),
+                )
+                .map_err(Into::into)
+            })
+            .collect()
+    }
+
+    pub async fn list_milestones(&self) -> Result<Vec<StoredMilestoneRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT milestone_id, job_id, job_type, title, quality_metric_name, quality_metric_value, evidence_bundle_sha256, published_by, published_at
+            FROM milestones
+            ORDER BY published_at DESC, job_id ASC, milestone_id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| StoredMilestoneRecord {
+                milestone_id: row.get::<String, _>("milestone_id"),
+                job_id: row.get::<String, _>("job_id"),
+                job_type: row.get::<String, _>("job_type"),
+                title: row.get::<String, _>("title"),
+                quality_metric_name: row.get::<String, _>("quality_metric_name"),
+                quality_metric_value: row.get::<f64, _>("quality_metric_value"),
+                evidence_bundle_sha256: row.get::<String, _>("evidence_bundle_sha256"),
+                published_by: row.get::<String, _>("published_by"),
+                published_at: row.get::<String, _>("published_at"),
+            })
+            .collect())
     }
 
     pub async fn record_node_identity(&self, identity: &NodeIdentity) -> Result<()> {
@@ -1730,6 +1873,31 @@ impl ProtocolStore {
         .await?;
         sqlx::query(
             r#"
+            CREATE TABLE IF NOT EXISTS milestones (
+                milestone_id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                job_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                contributing_node_ids_json TEXT NOT NULL,
+                quality_metric_name TEXT NOT NULL,
+                quality_metric_value REAL NOT NULL,
+                evidence_bundle_sha256 TEXT NOT NULL,
+                verification_receipt_sha256_list_json TEXT NOT NULL,
+                published_by TEXT NOT NULL,
+                published_at TEXT NOT NULL,
+                signing_key_id TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                milestone_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"
             CREATE TABLE IF NOT EXISTS chain_submissions (
                 job_id TEXT PRIMARY KEY,
                 receipt_registry_tx_hash TEXT NOT NULL,
@@ -1755,8 +1923,8 @@ fn enum_label<T: serde::Serialize>(value: &T) -> Result<String> {
 mod tests {
     use super::*;
     use osciris_core::{
-        ChallengeReasonCode, ChallengeStatus, JobAssignment, JobType, NodeRole, NodeStatus,
-        PrivacyMode, PrivacyPolicy, VerificationChecks, VerificationStatus,
+        ChallengeReasonCode, ChallengeStatus, JobAssignment, JobType, MilestoneRecord, NodeRole,
+        NodeStatus, PrivacyMode, PrivacyPolicy, VerificationChecks, VerificationStatus,
     };
     use uuid::Uuid;
 
@@ -2007,6 +2175,42 @@ mod tests {
         assert_eq!(job_availability, vec![availability.clone()]);
         let availability_objects = store.list_receipt_availability_objects().await.unwrap();
         assert_eq!(availability_objects, vec![availability]);
+
+        let milestone = MilestoneRecord {
+            milestone_id: Uuid::now_v7(),
+            job_id: loaded_availability.job_id,
+            job_type: JobType::InferenceEconomics,
+            title: "Community inference milestone".to_string(),
+            summary: "GPU contributors published a shared inference quality checkpoint."
+                .to_string(),
+            contributing_node_ids: vec!["provider-a".to_string(), "verifier-1".to_string()],
+            quality_metric_name: "quality_retention".to_string(),
+            quality_metric_value: 0.91,
+            evidence_bundle_sha256: loaded_availability.bundle_sha256.clone(),
+            verification_receipt_sha256_list: vec!["c".repeat(64)],
+            published_by: "enterprise-node-1".to_string(),
+            published_at: "2026-06-04T00:01:30Z".to_string(),
+            signing_key_id: "enterprise-key".to_string(),
+            signature: "milestone-signature".to_string(),
+        };
+        store.record_milestone(&milestone).await.unwrap();
+        let loaded_milestone = store
+            .load_milestone(&milestone.milestone_id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded_milestone, milestone);
+        let job_milestones = store
+            .load_milestones_by_job(&milestone.job_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(job_milestones, vec![milestone.clone()]);
+        let milestone_rows = store.list_milestones().await.unwrap();
+        assert_eq!(milestone_rows.len(), 1);
+        assert_eq!(
+            milestone_rows[0].milestone_id,
+            milestone.milestone_id.to_string()
+        );
 
         let mut challenge = ChallengeRecord {
             challenge_id: Uuid::now_v7(),

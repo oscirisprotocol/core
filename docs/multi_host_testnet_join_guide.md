@@ -161,6 +161,13 @@ Inspect claims:
 
 ```bash
 osciris-node network claims --work-root /tmp/osciris-enterprise
+
+osciris-node network create-job-claim \
+  --work-root /tmp/osciris-provider-a \
+  --job-id <job-id> \
+  --provider-id provider-a \
+  --signing-key-seed-file /run/osciris/provider-a.seed \
+  --claim-note "matched gpu>=24gb"
 ```
 
 Assign provider A:
@@ -180,9 +187,27 @@ Enterprise or observer:
 
 ```bash
 osciris-node network job-status --work-root /tmp/osciris-enterprise --job-id <job-id>
+osciris-node network participant-status --work-root /tmp/osciris-enterprise --job-id <job-id> --output /tmp/osciris-participant-status.json
 osciris-node network quorum-status --work-root /tmp/osciris-enterprise --job-id <job-id>
 osciris-node network settlement-status --work-root /tmp/osciris-enterprise --job-id <job-id>
 osciris-node network provider-status --work-root /tmp/osciris-enterprise
+```
+
+Publish a milestone from the completed evidence bundle:
+
+```bash
+osciris-node network publish-milestone \
+  --work-root /tmp/osciris-enterprise \
+  --job-id <job-id> \
+  --title "Shared inference milestone" \
+  --summary "Provider and verifier peers completed the first communal checkpoint." \
+  --quality-metric-name quality_retention \
+  --quality-metric-value 0.91 \
+  --publisher-id enterprise-1 \
+  --signing-key-id enterprise-key \
+  --signing-key-seed-file /run/osciris/enterprise.seed
+
+osciris-node network milestones --work-root /tmp/osciris-enterprise --job-id <job-id>
 ```
 
 Expected MVP outcome after successful provider execution and verifier acceptance:

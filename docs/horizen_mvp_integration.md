@@ -41,6 +41,10 @@ participation, receipts, challenges, and settlement reviewable.
 5. Check challenge window.
 6. Export settlement-ready status.
 
+The `SubmitReceipt` path anchors hashes and receipt commitments first. It does
+not publish raw payloads, datasets, model artifacts, or full evidence bundles to
+Horizen testnet.
+
 ## Customer Billing Boundary
 
 For MVP, customer-facing billing should remain stable-value and off-chain unless

@@ -44,12 +44,16 @@ osciris-node network create-provider-capability \
   --node-id provider-a \
   --signing-key-id provider-a-key \
   --signing-key-seed-file /run/osciris/provider-a.seed \
+  --host-class aws_g5_xlarge \
   --gpu-model "NVIDIA A10G" \
   --gpu-count 1 \
-  --gpu-vram-gb 24 \
-  --region us-east-1 \
-  --jurisdiction US \
-  --provider-class controlled-mvp
+  --vram-gb 24 \
+  --cuda-available true \
+  --supported-job-type llm_lora_economics \
+  --supported-runtime python3 \
+  --pricing-hint "testnet-credits" \
+  --current-load 0 \
+  --active-job-count 0
 ```
 
 ## Enterprise Job
@@ -82,6 +86,17 @@ osciris-node network assign-job \
   --provider-id provider-a \
   --assigner-id enterprise-1 \
   --signing-key-seed-file /run/osciris/enterprise.seed
+```
+
+Provider claim after capability publish:
+
+```bash
+osciris-node network create-job-claim \
+  --work-root /tmp/osciris-provider-a \
+  --job-id <job-id> \
+  --provider-id provider-a \
+  --signing-key-seed-file /run/osciris/provider-a.seed \
+  --claim-note "matched gpu>=24gb"
 ```
 
 ## Provider Execution
@@ -123,12 +138,39 @@ Expected verifier output:
 - evidence hash checked against manifest
 - quorum contribution
 
+## Milestone Publication
+
+After the verifier receipts are present, publish the communal milestone record:
+
+```bash
+osciris-node network publish-milestone \
+  --work-root /tmp/osciris-enterprise \
+  --job-id <job-id> \
+  --title "Shared inference milestone" \
+  --summary "The provider and verifier peers completed the first shared quality checkpoint." \
+  --quality-metric-name quality_retention \
+  --quality-metric-value 0.91 \
+  --publisher-id enterprise-1 \
+  --signing-key-id enterprise-key \
+  --signing-key-seed-file /run/osciris/enterprise.seed
+
+osciris-node network milestones --work-root /tmp/osciris-enterprise --job-id <job-id>
+```
+
+The milestone record is the public participant-facing proof that a workload
+has moved from private execution into a shared, inspectable result.
+
 ## Buyer-Visible Status
 
 ```bash
 osciris-node network job-status \
   --work-root /tmp/osciris-enterprise \
   --job-id <job-id>
+
+osciris-node network participant-status \
+  --work-root /tmp/osciris-enterprise \
+  --job-id <job-id> \
+  --output /tmp/osciris-participant-status.json
 
 osciris-node network quorum-status \
   --work-root /tmp/osciris-enterprise \

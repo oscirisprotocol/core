@@ -14,6 +14,8 @@ Horizen testnet chain client.
 - The current protocol slice supports signed claims, enterprise assignment,
   provider execution receipts, verifier receipts, quorum, challenge gating, and
   settlement-ready local state.
+- Contributors can publish signed milestone records for completed training or
+  inference runs so peers can inspect shared progress from the same local store.
 - Receipt-backed Python workloads now include both `llm_lora_economics` and
   `inference_economics`.
 
@@ -46,13 +48,59 @@ cargo install --path crates/osciris-cli
 
 This installs the public binary as `osciris-node`.
 
+## Beta Collaboration Mode
+
+Early contributors can download a release binary from GitHub Releases or
+build the CLI locally, then sync the published bundle feed from OSCIRIS Labs:
+
+```bash
+osciris-node network sync-published \
+  --work-root /tmp/osciris-client \
+  --base-url https://oscirislabs.com
+```
+
+The command caches the reviewed participant snapshot, proof feed, and
+contributor manifest under the local `.osciris/published` directory, along
+with the public beta release manifest used for update checks. Running it with
+`--watch` keeps the bundle cache updated from the core team’s public publish
+surface.
+
+Check whether the binary is current:
+
+```bash
+osciris-node network check-updates \
+  --work-root /tmp/osciris-client \
+  --base-url https://oscirislabs.com
+```
+
+The command compares the running binary version against the public beta
+manifest and reports the matching release asset when a newer build is
+available.
+
+Colleague onboarding notes:
+
+[docs/beta_collaboration.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/protocol-rs/docs/beta_collaboration.md)
+
+One-command bootstrap:
+
+```bash
+bash scripts/bootstrap_beta_collaboration.sh
+```
+
 ## Quick Start
 
 ```bash
 osciris-node --version
 osciris-node doctor --repo-root /absolute/path/to/OSCIRIS
 osciris-node demo local-settlement
+osciris-node demo contributor-flow --work-root /tmp/osciris-demo
 ```
+
+The local-settlement demo writes local artifacts for job status, settlement
+status, a signed milestone record, and a participant snapshot JSON for the
+same job. The contributor-flow demo wraps the same settlement path with a
+readable install, identity, capability, claim, receipt, verifier, and
+milestone workflow manifest for GPU peers.
 
 Generate a contributor identity:
 
@@ -90,6 +138,57 @@ osciris-node run-provider \
   --signing-key-seed-file /run/osciris/provider-a.seed \
   --repo-root /absolute/path/to/OSCIRIS \
   --work-root /tmp/osciris-provider-a
+```
+
+Publish the provider capability and signed job claim:
+
+```bash
+osciris-node network create-provider-capability \
+  --work-root /tmp/osciris-provider-a \
+  --node-id provider-a \
+  --signing-key-seed-file /run/osciris/provider-a.seed \
+  --host-class aws_g5_xlarge \
+  --gpu-model "NVIDIA A10G" \
+  --gpu-count 1 \
+  --vram-gb 24 \
+  --cuda-available true \
+  --supported-job-type llm_lora_economics \
+  --supported-runtime python3 \
+  --pricing-hint "testnet-credits" \
+  --current-load 0 \
+  --active-job-count 0
+
+osciris-node network create-job-claim \
+  --work-root /tmp/osciris-provider-a \
+  --job-id <job-id> \
+  --provider-id provider-a \
+  --signing-key-seed-file /run/osciris/provider-a.seed \
+  --claim-note "matched gpu>=24gb"
+```
+
+Publish a milestone after the evidence bundle and verifier receipts exist:
+
+```bash
+osciris-node network publish-milestone \
+  --work-root /tmp/osciris-provider-a \
+  --job-id <job-id> \
+  --title "Inference quality milestone" \
+  --summary "Provider A completed the shared inference checkpoint." \
+  --quality-metric-name quality_retention \
+  --quality-metric-value 0.91 \
+  --publisher-id enterprise-1 \
+  --signing-key-id enterprise-key \
+  --signing-key-seed-file /run/osciris/enterprise.seed
+```
+
+Contributors can inspect the shared job, evidence, verifier, and milestone
+state in one read-only snapshot with:
+
+```bash
+osciris-node network participant-status \
+  --work-root /tmp/osciris-provider-a \
+  --job-id <job-id> \
+  --output /tmp/osciris-participant-status.json
 ```
 
 Multi-machine onboarding:
