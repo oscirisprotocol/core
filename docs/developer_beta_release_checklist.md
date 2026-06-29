@@ -3,7 +3,22 @@
 Use this checklist before publishing a new public `osciris-node` beta build for
 contributors.
 
-Recommended packaging command:
+Recommended end-to-end operator command:
+
+```bash
+bash scripts/run_beta_release_flow.sh \
+  --version 0.1.0 \
+  --release-notes "Beta collaboration release for colleague onboarding, published bundle sync, and release checks." \
+  --asset macos-aarch64=/absolute/path/to/osciris-node \
+  --asset linux-x86_64=/absolute/path/to/osciris-node \
+  --website-public-dir /absolute/path/to/OSCIRISLABS/public \
+  --verify-base-url https://oscirislabs.com
+```
+
+Use `--publish-release` when you want the script to create or update the GitHub
+prerelease after packaging.
+
+Underlying packaging command:
 
 ```bash
 bash scripts/package_beta_release.sh \
@@ -45,7 +60,7 @@ The verifier checks:
 Recommended publication sequence:
 
 1. Build the release binary or binaries locally.
-2. Run `bash scripts/package_beta_release.sh ...` to generate the tarball(s) and
+2. Run `bash scripts/run_beta_release_flow.sh ...` to generate the tarball(s) and
    manifest under `dist/beta-release/`.
 3. Upload the tarball(s) to the matching GitHub prerelease.
 4. Confirm `gh release view <tag>` shows the same asset names.
