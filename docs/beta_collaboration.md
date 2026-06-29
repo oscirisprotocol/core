@@ -74,5 +74,5 @@ and participate through the CLI.
 
 ## Release notes for maintainers
 
-- [developer_beta_release_checklist.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/protocol-rs/docs/developer_beta_release_checklist.md)
-- [developer_beta_launch_copy.md](/Users/meshachishaya/CascadeProjects/windsurf-project/OSCIRIS/protocol-rs/docs/developer_beta_launch_copy.md)
+- [developer_beta_release_checklist.md](developer_beta_release_checklist.md)
+- [developer_beta_launch_copy.md](developer_beta_launch_copy.md)
