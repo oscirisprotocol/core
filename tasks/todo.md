@@ -144,7 +144,7 @@ developers and NVIDIA GPU users.
 - [x] Normalize CLI beta platform key selection
 - [x] Update release and collaborator docs
 - [x] Verify packaging and verifier behavior
-- [ ] Verify Windows-target cargo check on a Windows/MSVC runner
+- [x] Verify Windows-target cargo check on a Windows/MSVC runner
 
 ### Review
 
@@ -174,3 +174,11 @@ developers and NVIDIA GPU users.
   osciris-node` could not complete on macOS because native C dependencies need
   Windows/MSVC SDK headers (`windows.h`, `assert.h`). The Windows build must be
   verified on `windows-latest` through GitHub Actions or a real Windows machine.
+- GitHub Actions release matrix verification completed on branch
+  `codex/public-main-beta-promotion`:
+  - PR run `28387903806` passed with `Build macos-aarch64`,
+    `Build linux-x86_64`, and `Build windows-x86_64` all green
+  - push run `28387900403` passed with `Build macos-aarch64`,
+    `Build linux-x86_64`, and `Build windows-x86_64` all green
+  - release publication remained correctly skipped on PR and branch pushes,
+    preserving tag/manual gating for actual GitHub Release uploads

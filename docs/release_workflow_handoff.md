@@ -1,121 +1,81 @@
 # OSCIRIS Release Workflow Handoff
 
-This repo already has the beta collaboration branch and onboarding changes
-reviewable in GitHub. The remaining missing piece is the GitHub Actions
-release workflow.
+The release workflow is now live in this repo and has been verified on GitHub
+Actions across all three beta platforms:
 
-It was prepared locally but could not be pushed with the current credentials
-because GitHub rejected workflow-file updates without `workflow` scope.
+- `macos-aarch64`
+- `linux-x86_64`
+- `windows-x86_64`
 
-## Maintainer action
+The public beta release surface has also been updated and verified against
+`https://oscirislabs.com`.
 
-Create `.github/workflows/release.yml` with the content below, or apply the
-same file from a session that has permission to update workflow files.
+## Current State
 
-```yaml
-name: Release
+- Workflow file present: `.github/workflows/release.yml`
+- Branch and PR validation:
+  - PR run `28387903806` passed
+  - push run `28387900403` passed
+- GitHub prerelease:
+  - tag `v0.1.0`
+  - includes:
+    - `osciris-node-macos-aarch64.tar.gz`
+    - `osciris-node-linux-x86_64.tar.gz`
+    - `osciris-node-windows-x86_64.zip`
+- Public website manifest:
+  - `https://oscirislabs.com/beta-release-manifest.json`
+  - includes all three required platforms with matching SHA-256 hashes
+- Public verifier:
+  - `python3 scripts/verify_beta_release_surface.py --base-url https://oscirislabs.com`
+  - passes
 
-on:
-  push:
-    tags:
-      - "v*"
-  workflow_dispatch:
+## Workflow Behavior
 
-permissions:
-  contents: write
+The GitHub Actions workflow is intentionally split into two modes:
 
-jobs:
-  build:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            archive_name: osciris-node-x86_64-unknown-linux-gnu.tar.gz
-          - os: macos-14
-            target: aarch64-apple-darwin
-            archive_name: osciris-node-aarch64-apple-darwin.tar.gz
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive_name: osciris-node-windows-x86_64.zip
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+- PRs and branch pushes:
+  - run the full macOS/Linux/Windows build matrix
+  - upload build artifacts for inspection
+  - do not publish a GitHub Release
+- tag pushes `v*` and `workflow_dispatch`:
+  - run the same build matrix
+  - package deterministic archives through `scripts/package_beta_release.sh`
+  - publish the prerelease assets
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+This keeps release publication gated while still proving Windows/MSVC build
+health on ordinary review flows.
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+## Operator Notes
 
-      - name: Build release binary
-        run: cargo build --locked --release -p osciris-cli --bin osciris-node --target ${{ matrix.target }}
+When publishing or repairing a beta release manually, prefer the repo script:
 
-      - name: Package binary
-        run: |
-          set -euo pipefail
-          staging_dir="release-${{ matrix.target }}"
-          mkdir -p "$staging_dir"
-          if [[ "${{ matrix.target }}" == *windows* ]]; then
-            cp "target/${{ matrix.target }}/release/osciris-node.exe" "$staging_dir/osciris-node.exe"
-            powershell Compress-Archive -Path "$staging_dir/osciris-node.exe" -DestinationPath "${{ matrix.archive_name }}"
-          else
-            cp "target/${{ matrix.target }}/release/osciris-node" "$staging_dir/osciris-node"
-            tar -C "$staging_dir" -czf "${{ matrix.archive_name }}" osciris-node
-          fi
-          python3 - <<'PY'
-          import hashlib
-          from pathlib import Path
-
-          archive = Path("${{ matrix.archive_name }}")
-          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-          Path("${{ matrix.archive_name }}.sha256").write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
-          PY
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.archive_name }}
-          path: |
-            ${{ matrix.archive_name }}
-            ${{ matrix.archive_name }}.sha256
-
-  release:
-    name: Publish GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-artifacts
-
-      - name: Create release notes
-        run: |
-          set -euo pipefail
-          find release-artifacts -type f | sort > release-artifacts/FILES.txt
-
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            release-artifacts/**/*.tar.gz
-            release-artifacts/**/*.zip
-            release-artifacts/**/*.sha256
+```bash
+bash scripts/run_beta_release_flow.sh \
+  --version 0.1.0 \
+  --release-notes "Beta collaboration release for colleague onboarding, published bundle sync, and release checks." \
+  --asset macos-aarch64=/absolute/path/to/osciris-node \
+  --asset linux-x86_64=/absolute/path/to/osciris-node \
+  --asset windows-x86_64=/absolute/path/to/osciris-node.exe \
+  --publish-release \
+  --website-public-dir /absolute/path/to/OSCIRISLABS/public
 ```
 
-## Verification after maintainer apply
+Important behavior:
 
-- push a beta tag such as `v0.1.0`
-- confirm the workflow builds Linux, macOS, and Windows release artifacts
-- confirm the GitHub Release includes Unix `.tar.gz`, Windows `.zip`, and `.sha256` files
-- confirm `OSCIRISLABS/public/beta-release-manifest.json` points to the same version
-  and asset names as the GitHub Release
-- keep `dist/beta-release/` local only; it is a generated staging directory for
-  release packaging and website republish, not a committed artifact path
+- The script packages deterministic Unix `.tar.gz` archives and a deterministic
+  Windows `.zip`.
+- If `--website-public-dir` is set, it refuses to copy the public manifest
+  until the referenced GitHub release assets verify cleanly.
+- Right after `gh release upload --clobber`, GitHub may briefly serve stale
+  asset bytes under existing tag URLs. If that happens, wait for propagation
+  and rerun verification before publishing the website manifest.
+
+## Verification Checklist
+
+For a future beta refresh, confirm all of the following:
+
+- `gh release view <tag>` shows all three expected assets
+- `python3 scripts/verify_beta_release_surface.py --base-url https://oscirislabs.com` passes
+- the website manifest asset hashes match the actual GitHub release downloads
+- Windows onboarding uses `scripts/bootstrap_beta_collaboration.ps1`
+- release publication remains gated to tag/manual workflow runs
