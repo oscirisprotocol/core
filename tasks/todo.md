@@ -1,5 +1,39 @@
 # Task Plan
 
+## Publish Safety, Participant Warnings, And License
+
+### Objective
+
+Make the public repo safe to point developers at by documenting publish links,
+beta warnings, heterogeneous hardware participation, and the effective license.
+
+### Checklist
+
+- [x] Confirm current crate metadata license before choosing public license language
+- [x] Add root MIT `LICENSE` matching the existing workspace metadata
+- [x] Add `NOTICE` for OSCIRIS marks, hosted services, commercial pilots,
+  rewards, settlement terms, and SLAs
+- [x] Add public beta publish links to `README.md`
+- [x] Add participant warnings for beta status, data handling, hardware
+  attestation limits, Windows NVIDIA smoke testing, and operator responsibility
+- [x] Document heterogeneous provider tiers covering CPU, Apple Silicon/MPS/MLX,
+  NVIDIA CUDA, and frontier hardware
+- [x] Update beta collaboration docs with platform support, checksum
+  expectations, provider hardware guidance, and participant warnings
+
+### Review
+
+- The repo remains MIT-licensed because the workspace metadata already declared
+  `license = "MIT"`. A root `LICENSE` now makes that explicit for public GitHub
+  consumers.
+- Public messaging should use heterogeneous compute language: CPU, Apple
+  Silicon/MPS, and NVIDIA CUDA can participate, with job routing constrained by
+  declared and verified capability.
+- Enterprise claims remain bounded: CUDA providers are recommended for
+  high-throughput enterprise AI workloads; Apple Silicon is valid for MPS/MLX
+  compatible workloads and beta participation; Windows NVIDIA hosts require
+  smoke testing before production-readiness claims.
+
 ## Fix Protocol CLI Security Findings
 
 ### Objective

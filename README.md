@@ -11,6 +11,8 @@ Horizen testnet chain client.
 - Early developer MVP is published.
 - Contributors can install `osciris-node`, generate identities, run the local
   settlement demo, and follow the multi-host testnet join guide.
+- Public beta binaries are available for macOS, Linux, and Windows through
+  the release manifest at `https://oscirislabs.com/beta-release-manifest.json`.
 - The current protocol slice supports signed claims, enterprise assignment,
   provider execution receipts, verifier receipts, quorum, challenge gating, and
   settlement-ready local state.
@@ -39,6 +41,102 @@ Latest protocol proof shape:
 - multi-host off-chain workflow across enterprise, provider, and verifier roles
 - accepted local settlement demo ending in `settlement_ready`
 - Horizen testnet contract package published separately in `contracts`
+
+## Public Beta Positioning
+
+OSCIRIS Core is open for developer beta review. The public surface should be
+described as a heterogeneous private AI compute coordination network for
+bounded validation workloads, not as production mainnet or a final commercial
+SLA.
+
+Publish these links for reviewers:
+
+- website: `https://oscirislabs.com`
+- developer beta manifest: `https://oscirislabs.com/beta-release-manifest.json`
+- GitHub repo and releases: `https://github.com/oscirisprotocol/core`
+- technical resources: `https://oscirislabs.com/resources`
+- proof console: `https://oscirislabs.com/app`
+- whitepaper: `https://oscirislabs.com/whitepaper`
+
+Recommended public wording:
+
+> OSCIRIS is opening a developer beta for heterogeneous private AI compute
+> coordination across macOS, Linux, and Windows. Providers may participate
+> using CPU, Apple Silicon/MPS, or NVIDIA CUDA hosts, with workload routing
+> based on declared and verified capability. CUDA is required only for
+> CUDA-specific workloads.
+
+## Participant Warnings
+
+Read this before running a provider, verifier, or enterprise client:
+
+- This is a developer beta, not production mainnet.
+- Do not process regulated, confidential, customer, health, financial, or
+  classified data unless a separate written review authorizes that use.
+- Provider capability claims are signed and checked, but they are not the same
+  as full hardware attestation.
+- CPU, Apple Silicon, and NVIDIA CUDA hosts can participate, but jobs must
+  match the provider runtime and memory capability.
+- NVIDIA CUDA support does not mean every Windows NVIDIA host is production
+  ready; Windows GPU providers still need host smoke testing before stronger
+  public claims.
+- Rewards, payments, escrow, settlement, and SLA terms are not final unless
+  separately agreed.
+- Operators are responsible for local security, firewalling, key storage,
+  driver updates, workload legality, and data handling compliance.
+- Workloads can fail, be rejected by verifiers, or be excluded if capability
+  metadata is incomplete or inconsistent.
+- Never publish private signing seeds, API keys, datasets, enterprise material,
+  or secrets in work roots, logs, screenshots, or issue reports.
+- Verify release asset SHA-256 checksums before running downloaded binaries.
+
+## Provider Hardware Tiers
+
+OSCIRIS should admit heterogeneous nodes while routing jobs strictly by
+capability. NVIDIA is the primary CUDA enterprise path, but it is not the only
+participation path.
+
+| Tier | Minimum hardware | Intended use |
+| --- | --- | --- |
+| `cpu-control` | 4 CPU cores, 8-16 GB RAM, 50 GB SSD | relay, verifier, enterprise client, proof review |
+| `apple-silicon-dev` | Apple M1/M2/M3/M4, 16 GB unified memory | developer beta, validation, light MPS/MLX workloads |
+| `apple-silicon-pro` | Apple M-series Pro/Max/Ultra, 24-64 GB unified memory | non-CUDA provider tier, MPS/MLX-compatible workloads |
+| `cuda-standard` | NVIDIA CUDA GPU, 24 GB VRAM, 64 GB RAM | default high-value AI provider tier |
+| `cuda-enterprise` | NVIDIA CUDA GPU, 48 GB+ VRAM, ECC preferred, 128 GB RAM | enterprise pilots and regulated workload review |
+| `frontier` | A100/H100/B200-class or similar, 80 GB+ VRAM | premium large-model workloads |
+
+Example Apple Silicon provider capability:
+
+```json
+{
+  "host_class": "apple-silicon-pro",
+  "gpu_model": "Apple M4 Pro",
+  "gpu_count": 1,
+  "vram_gb": 24,
+  "cuda_available": false,
+  "mps_available": true,
+  "supported_runtimes": ["python3", "mps", "mlx"]
+}
+```
+
+Example CUDA provider capability:
+
+```json
+{
+  "host_class": "cuda-standard",
+  "gpu_model": "NVIDIA RTX 4090",
+  "gpu_count": 1,
+  "vram_gb": 24,
+  "cuda_available": true,
+  "mps_available": false,
+  "supported_runtimes": ["python3", "cuda"]
+}
+```
+
+Do not advertise a workload tier as available unless the network has at least
+three healthy providers for that tier, two independent verifiers online,
+provider load below roughly 70%, recent capability and receipt verification,
+and one fallback provider in the same or acceptable region.
 
 ## Install
 
@@ -214,6 +312,15 @@ Horizen testnet integration:
   [OSCIRIS resources page](https://oscirislabs.com/resources#training-evidence)
 - Horizen testnet contract layer: private internal repository, summarized publicly in the
   [proof-aware contracts overview](https://oscirislabs.com/resources#proof-aware-contracts)
+
+## License
+
+The protocol and CLI code in this repository are published under the MIT
+License. See [LICENSE](LICENSE).
+
+The OSCIRIS name, OSCIRIS Labs name, logos, website content, hosted services,
+private reviews, commercial pilots, rewards, settlement terms, and service
+commitments are not granted by the software license. See [NOTICE](NOTICE).
 
 ## Current Boundary
 
