@@ -17,7 +17,7 @@ The public beta release surface has also been updated and verified against
   - PR run `28387903806` passed
   - push run `28387900403` passed
 - GitHub prerelease:
-  - tag `v0.1.0`
+  - tag `v0.1.0` (historical MIT-licensed release)
   - includes:
     - `osciris-node-macos-aarch64.tar.gz`
     - `osciris-node-linux-x86_64.tar.gz`
@@ -51,7 +51,7 @@ When publishing or repairing a beta release manually, prefer the repo script:
 
 ```bash
 bash scripts/run_beta_release_flow.sh \
-  --version 0.1.0 \
+  --version 0.1.1 \
   --release-notes "Beta collaboration release for colleague onboarding, published bundle sync, and release checks." \
   --asset macos-aarch64=/absolute/path/to/osciris-node \
   --asset linux-x86_64=/absolute/path/to/osciris-node \
@@ -64,6 +64,8 @@ Important behavior:
 
 - The script packages deterministic Unix `.tar.gz` archives and a deterministic
   Windows `.zip`.
+- Every archive contains the platform binary, the Apache-2.0 `LICENSE`, and
+  `NOTICE`.
 - If `--website-public-dir` is set, it refuses to copy the public manifest
   until the referenced GitHub release assets verify cleanly.
 - Right after `gh release upload --clobber`, GitHub may briefly serve stale
@@ -74,7 +76,9 @@ Important behavior:
 
 For a future beta refresh, confirm all of the following:
 
+- the release version is `0.1.1` or later and Cargo metadata is `Apache-2.0`
 - `gh release view <tag>` shows all three expected assets
+- every release archive contains its binary, `LICENSE`, and `NOTICE`
 - `python3 scripts/verify_beta_release_surface.py --base-url https://oscirislabs.com` passes
 - the website manifest asset hashes match the actual GitHub release downloads
 - Windows onboarding uses `scripts/bootstrap_beta_collaboration.ps1`

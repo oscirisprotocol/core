@@ -18,7 +18,7 @@ usage() {
   cat <<'EOF'
 Usage:
   bash scripts/run_beta_release_flow.sh \
-    --version 0.1.0 \
+    --version 0.1.1 \
     --release-notes "Beta collaboration release" \
     --asset macos-aarch64=/path/to/osciris-node \
     --asset linux-x86_64=/path/to/osciris-node \

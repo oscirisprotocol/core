@@ -75,8 +75,9 @@ Read this before running a provider, verifier, or enterprise client:
   classified data unless a separate written review authorizes that use.
 - Provider capability claims are signed and checked, but they are not the same
   as full hardware attestation.
-- CPU, Apple Silicon, and NVIDIA CUDA hosts can participate, but jobs must
-  match the provider runtime and memory capability.
+- CPU, Apple Silicon, and NVIDIA CUDA hosts can participate. Current automatic
+  matching checks job type and declared VRAM; operators must validate the
+  complete runtime before accepting work.
 - NVIDIA CUDA support does not mean every Windows NVIDIA host is production
   ready; Windows GPU providers still need host smoke testing before stronger
   public claims.
@@ -90,20 +91,15 @@ Read this before running a provider, verifier, or enterprise client:
   or secrets in work roots, logs, screenshots, or issue reports.
 - Verify release asset SHA-256 checksums before running downloaded binaries.
 
-## Provider Hardware Tiers
+## Provider Hardware Requirements
 
-OSCIRIS should admit heterogeneous nodes while routing jobs strictly by
-capability. NVIDIA is the primary CUDA enterprise path, but it is not the only
-participation path.
+Joining the developer beta does not require a GPU. The current evidence-backed
+GPU-worker minimum is 24 GB VRAM on Linux/NVIDIA CUDA. Lower-VRAM hosts may
+publish capability, but are not promised GPU jobs until smaller profiles are
+tested and published.
 
-| Tier | Minimum hardware | Intended use |
-| --- | --- | --- |
-| `cpu-control` | 4 CPU cores, 8-16 GB RAM, 50 GB SSD | relay, verifier, enterprise client, proof review |
-| `apple-silicon-dev` | Apple M1/M2/M3/M4, 16 GB unified memory | developer beta, validation, light MPS/MLX workloads |
-| `apple-silicon-pro` | Apple M-series Pro/Max/Ultra, 24-64 GB unified memory | non-CUDA provider tier, MPS/MLX-compatible workloads |
-| `cuda-standard` | NVIDIA CUDA GPU, 24 GB VRAM, 64 GB RAM | default high-value AI provider tier |
-| `cuda-enterprise` | NVIDIA CUDA GPU, 48 GB+ VRAM, ECC preferred, 128 GB RAM | enterprise pilots and regulated workload review |
-| `frontier` | A100/H100/B200-class or similar, 80 GB+ VRAM | premium large-model workloads |
+See [hardware requirements](docs/hardware_requirements.md) for role minimums,
+GPU tiers, platform support, and the current A10G/L40S evidence boundary.
 
 Example Apple Silicon provider capability:
 
@@ -315,12 +311,15 @@ Horizen testnet integration:
 
 ## License
 
-The protocol and CLI code in this repository are published under the MIT
-License. See [LICENSE](LICENSE).
+The protocol and CLI code in this repository are published under the Apache
+License 2.0. See [LICENSE](LICENSE).
 
-The OSCIRIS name, OSCIRIS Labs name, logos, website content, hosted services,
-private reviews, commercial pilots, rewards, settlement terms, and service
-commitments are not granted by the software license. See [NOTICE](NOTICE).
+The published `v0.1.0` binary release remains under the MIT license that applied
+when it was built. Version `0.1.1` is the first Apache-2.0 release boundary.
+
+Attribution is in [NOTICE](NOTICE). OSCIRIS marks, hosted services, commercial
+pilots, rewards, settlement terms, and service commitments are outside the
+software license; see [Trademarks and Services](TRADEMARKS.md).
 
 ## Current Boundary
 

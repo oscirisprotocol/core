@@ -7,7 +7,7 @@ Recommended end-to-end operator command:
 
 ```bash
 bash scripts/run_beta_release_flow.sh \
-  --version 0.1.0 \
+  --version 0.1.1 \
   --release-notes "Beta collaboration release for colleague onboarding, published bundle sync, and release checks." \
   --asset macos-aarch64=/absolute/path/to/osciris-node \
   --asset linux-x86_64=/absolute/path/to/osciris-node \
@@ -34,17 +34,18 @@ Underlying packaging command:
 
 ```bash
 bash scripts/package_beta_release.sh \
-  --version 0.1.0 \
+  --version 0.1.1 \
   --channel beta \
-  --release-page-url https://github.com/oscirisprotocol/core/releases/tag/v0.1.0 \
+  --release-page-url https://github.com/oscirisprotocol/core/releases/tag/v0.1.1 \
   --release-notes "Beta collaboration release for colleague onboarding, published bundle sync, and release checks." \
-  --base-download-url https://github.com/oscirisprotocol/core/releases/download/v0.1.0 \
+  --base-download-url https://github.com/oscirisprotocol/core/releases/download/v0.1.1 \
   --asset macos-aarch64=/absolute/path/to/osciris-node \
   --asset linux-x86_64=/absolute/path/to/osciris-node \
   --asset windows-x86_64=/absolute/path/to/osciris-node.exe
 ```
 
-The script emits the release archives and a `beta-release-manifest.json` with
+The script emits release archives containing the binary, `LICENSE`, and
+`NOTICE`, plus a `beta-release-manifest.json` with
 per-asset SHA-256 checksums.
 
 Default local output:
@@ -111,7 +112,10 @@ Do not expand the public message beyond the current repo boundary.
 
 ## Release Acceptance Checklist
 
+- [ ] Workspace and crate metadata report `Apache-2.0`.
+- [ ] The release version is `0.1.1` or later; historical `v0.1.0` remains MIT.
 - [ ] GitHub Release assets exist for the intended beta version.
+- [ ] Every release archive contains the platform binary, `LICENSE`, and `NOTICE`.
 - [ ] Public beta manifest includes `macos-aarch64`, `linux-x86_64`, and `windows-x86_64`.
 - [ ] Release notes describe the build as an early developer beta.
 - [ ] Public beta manifest points to the same version and assets.

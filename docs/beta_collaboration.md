@@ -105,22 +105,14 @@ and participate through the CLI.
 
 ## Provider hardware guidance
 
-OSCIRIS supports heterogeneous providers. CPU and Apple Silicon hosts can
-participate in control, validation, MPS/MLX-compatible workloads, and developer
-beta capacity. NVIDIA CUDA hosts are recommended for high-throughput enterprise
-AI workloads, with 24 GB VRAM as the practical default tier and 48 GB+ for
-enterprise pilots.
+OSCIRIS supports heterogeneous participants. Joining the developer beta does
+not require a GPU. The current evidence-backed GPU-worker minimum is 24 GB VRAM
+on Linux/NVIDIA CUDA. Lower-VRAM hosts may publish capability, but are not
+promised GPU jobs until smaller profiles are tested and published.
 
-Recommended public beta tiers:
-
-| Tier | Minimum hardware | Intended use |
-| --- | --- | --- |
-| `cpu-control` | 4 CPU cores, 8-16 GB RAM, 50 GB SSD | relay, verifier, enterprise client, proof review |
-| `apple-silicon-dev` | Apple M1/M2/M3/M4, 16 GB unified memory | developer beta, validation, light MPS/MLX workloads |
-| `apple-silicon-pro` | Apple M-series Pro/Max/Ultra, 24-64 GB unified memory | non-CUDA provider tier, MPS/MLX-compatible workloads |
-| `cuda-standard` | NVIDIA CUDA GPU, 24 GB VRAM, 64 GB RAM | default high-value AI provider tier |
-| `cuda-enterprise` | NVIDIA CUDA GPU, 48 GB+ VRAM, ECC preferred, 128 GB RAM | enterprise pilots and regulated workload review |
-| `frontier` | A100/H100/B200-class or similar, 80 GB+ VRAM | premium large-model workloads |
+Read [hardware requirements](hardware_requirements.md) before publishing a
+provider capability. It defines role minimums, GPU tiers, platform support, and
+the current A10G/L40S evidence boundary.
 
 CUDA is required only for CUDA-specific jobs. Apple Silicon providers should
 advertise `mps_available=true`, `cuda_available=false`, and runtimes such as
@@ -132,7 +124,9 @@ advertise `mps_available=true`, `cuda_available=false`, and runtimes such as
   classified data unless a separate written review authorizes that use.
 - Provider capability claims are signed and checked, but they are not the same
   as full hardware attestation.
-- Jobs must match the provider runtime and memory capability.
+- Current automatic matching checks job type and declared VRAM. Operators must
+  validate runtime packages, system memory, disk capacity, and model fit before
+  accepting work.
 - Windows NVIDIA GPU participation requires host smoke testing before stronger
   public production-readiness claims.
 - Rewards, payments, escrow, settlement, and SLA terms are not final unless

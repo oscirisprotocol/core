@@ -330,7 +330,9 @@ def verify_asset(asset: dict[str, Any], timeout_seconds: float, allow_missing_sh
             error="unsupported asset archive format",
         )
 
-    if expected_member not in members:
+    required_members = {expected_member, "LICENSE", "NOTICE"}
+    missing_members = sorted(required_members.difference(members))
+    if missing_members:
         return AssetCheck(
             platform=platform,
             filename=filename,
@@ -342,7 +344,7 @@ def verify_asset(asset: dict[str, Any], timeout_seconds: float, allow_missing_sh
             sha256_actual=sha256_actual,
             archive_format=archive_format,
             tar_members=members,
-            error=f"archive does not contain {expected_member}",
+            error=f"archive is missing required members: {', '.join(missing_members)}",
         )
 
     return AssetCheck(
