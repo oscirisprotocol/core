@@ -12,3 +12,7 @@
 - Do not equate missing platform benchmarks with protocol exclusion. OSCIRIS
   accepts heterogeneous nodes through signed capability declarations; benchmark
   evidence limits performance claims, while job profiles determine targeting.
+- Describe inference as provider-local execution, never as centrally hosted by
+  OSCIRIS. Each participant stores and serves the pinned model on its own
+  machine; OSCIRIS coordinates discovery, assignment, receipts, verification,
+  and published network status.
