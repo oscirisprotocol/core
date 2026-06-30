@@ -107,6 +107,7 @@ osciris-node network run-provider \
   --repo-root /absolute/path/to/OSCIRIS \
   --signing-key-id provider-a-key \
   --signing-key-seed-file /run/osciris/provider-a.seed \
+  --trusted-assigner-public-key-base64 <enterprise-ed25519-public-key> \
   --listen-addr /ip4/0.0.0.0/tcp/4102 \
   --bootstrap-peer <bootstrap-multiaddr>
 ```

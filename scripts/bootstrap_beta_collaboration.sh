@@ -56,15 +56,18 @@ sha256_file() {
 }
 
 download_release_asset() {
-  local manifest_json temp_dir asset_url asset_filename
+  local manifest_json temp_dir asset_url asset_filename asset_sha256 archive_path
   manifest_json="$(curl -fsSL "${BASE_URL%/}/beta-release-manifest.json")"
   temp_dir="$(mktemp -d)"
   asset_url=""
   asset_filename=""
+  asset_sha256=""
 
   if ! python3 - "$manifest_json" > "$temp_dir/asset-info.txt" <<'PY'
 import json
+import os
 import platform
+import re
 import sys
 
 manifest = json.loads(sys.argv[1])
@@ -94,8 +97,19 @@ if selected is None:
         )
     raise SystemExit("beta manifest does not list any downloadable assets")
 
+filename = selected.get("filename")
+if not isinstance(filename, str) or not filename:
+    raise SystemExit("selected beta asset is missing filename")
+if filename != os.path.basename(filename) or "/" in filename or "\\" in filename or ".." in filename:
+    raise SystemExit(f"selected beta asset filename is not safe: {filename!r}")
+if not re.fullmatch(r"osciris-node-[A-Za-z0-9_.-]+\.(tar\.gz|zip)", filename):
+    raise SystemExit(f"selected beta asset filename has unexpected format: {filename!r}")
+sha256 = selected.get("sha256")
+if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", sha256):
+    raise SystemExit(f"selected beta asset {filename!r} is missing a valid SHA-256 checksum")
 print(selected["url"])
-print(selected["filename"])
+print(filename)
+print(sha256.lower())
 PY
   then
     cat "$temp_dir/asset-info.txt" >&2 || true
@@ -108,53 +122,39 @@ PY
       asset_url="$line"
     elif [[ -z "$asset_filename" ]]; then
       asset_filename="$line"
+    elif [[ -z "$asset_sha256" ]]; then
+      asset_sha256="$line"
       break
     fi
   done < "$temp_dir/asset-info.txt"
 
-  if [[ -z "$asset_url" || -z "$asset_filename" ]]; then
+  if [[ -z "$asset_url" || -z "$asset_filename" || -z "$asset_sha256" ]]; then
     rm -rf "$temp_dir"
     echo "failed to resolve a downloadable asset from beta-release-manifest.json" >&2
     return 1
   fi
 
-  if ! curl -fsSL "$asset_url" -o "$temp_dir/$asset_filename"; then
+  archive_path="$temp_dir/release-asset.tar.gz"
+  if ! curl -fsSL "$asset_url" -o "$archive_path"; then
     rm -rf "$temp_dir"
     return 1
   fi
 
-  asset_sha256="$(python3 - "$manifest_json" "$asset_url" <<'PY'
-import json
-import sys
-
-manifest = json.loads(sys.argv[1])
-target_url = sys.argv[2]
-for asset in manifest.get("assets", []):
-    if asset.get("url") == target_url:
-        print(asset.get("sha256") or "")
-        break
-else:
-    print("")
-PY
-)"
-
-  if [[ -n "$asset_sha256" ]]; then
-    if ! checksum_actual="$(sha256_file "$temp_dir/$asset_filename")"; then
-      echo "release asset checksum verification requested but no sha256 tool is available" >&2
-      rm -rf "$temp_dir"
-      return 1
-    fi
-
-    if [[ "$checksum_actual" != "$asset_sha256" ]]; then
-      echo "release asset checksum mismatch for ${asset_filename}" >&2
-      echo "expected: ${asset_sha256}" >&2
-      echo "actual:   ${checksum_actual}" >&2
-      rm -rf "$temp_dir"
-      return 1
-    fi
+  if ! checksum_actual="$(sha256_file "$archive_path")"; then
+    echo "release asset checksum verification failed because no sha256 tool is available" >&2
+    rm -rf "$temp_dir"
+    return 1
   fi
 
-  if ! tar -xzf "$temp_dir/$asset_filename" -C "$temp_dir"; then
+  if [[ "$checksum_actual" != "$asset_sha256" ]]; then
+    echo "release asset checksum mismatch for ${asset_filename}" >&2
+    echo "expected: ${asset_sha256}" >&2
+    echo "actual:   ${checksum_actual}" >&2
+    rm -rf "$temp_dir"
+    return 1
+  fi
+
+  if ! tar -xzf "$archive_path" -C "$temp_dir"; then
     rm -rf "$temp_dir"
     return 1
   fi

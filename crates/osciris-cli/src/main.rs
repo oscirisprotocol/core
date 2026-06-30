@@ -687,6 +687,8 @@ enum NetworkCommands {
         signing_key_id: String,
         #[arg(long)]
         repo_root: PathBuf,
+        #[arg(long = "trusted-assigner-public-key-base64", required = true)]
+        trusted_assigner_public_keys_base64: Vec<String>,
         #[arg(long, default_value = "/ip4/127.0.0.1/tcp/0")]
         listen_addr: String,
         #[arg(long = "bootstrap-peer")]
@@ -2079,6 +2081,7 @@ fn main() -> Result<()> {
                 signing_key_seed_file,
                 signing_key_id,
                 repo_root,
+                trusted_assigner_public_keys_base64,
                 listen_addr,
                 bootstrap_peers,
                 presence_interval_seconds,
@@ -2092,6 +2095,7 @@ fn main() -> Result<()> {
                     signing_key_id,
                     repo_root,
                     work_root,
+                    trusted_assigner_public_keys_base64,
                     listen_addr,
                     bootstrap_peers,
                     presence_interval: Duration::from_secs(presence_interval_seconds),

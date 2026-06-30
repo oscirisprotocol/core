@@ -17,6 +17,27 @@ function Get-JsonFromUrl {
     return Invoke-RestMethod -Uri $Url -Headers @{ "User-Agent" = "osciris-windows-bootstrap/0.1" }
 }
 
+function Assert-SafeAsset {
+    param($Asset)
+
+    if (-not $Asset.filename) {
+        throw "selected beta asset is missing filename"
+    }
+
+    $filename = [string]$Asset.filename
+    if ($filename -ne [System.IO.Path]::GetFileName($filename) -or
+        $filename.Contains("/") -or
+        $filename.Contains("\") -or
+        $filename.Contains("..") -or
+        -not ($filename -match '^osciris-node-[A-Za-z0-9_.-]+\.zip$')) {
+        throw "selected beta asset filename is not safe: ${filename}"
+    }
+
+    if (-not $Asset.sha256 -or -not ([string]$Asset.sha256 -match '^[0-9a-fA-F]{64}$')) {
+        throw "selected beta asset ${filename} is missing a valid SHA-256 checksum"
+    }
+}
+
 function Install-ReleaseAsset {
     $manifestUrl = "$($BaseUrl.TrimEnd('/'))/beta-release-manifest.json"
     $manifest = Get-JsonFromUrl -Url $manifestUrl
@@ -26,19 +47,18 @@ function Install-ReleaseAsset {
         $available = @($manifest.assets | ForEach-Object { $_.platform }) -join ", "
         throw "beta manifest does not list a downloadable asset for ${PlatformKey}; available platforms: ${available}"
     }
+    Assert-SafeAsset -Asset $asset
 
     $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
     try {
-        $archivePath = Join-Path $tempDir $asset.filename
+        $archivePath = Join-Path $tempDir "release-asset.zip"
         Invoke-WebRequest -Uri $asset.url -OutFile $archivePath -Headers @{ "User-Agent" = "osciris-windows-bootstrap/0.1" }
 
-        if ($asset.sha256) {
-            $actual = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash.ToLowerInvariant()
-            $expected = [string]$asset.sha256
-            if ($actual -ne $expected.ToLowerInvariant()) {
-                throw "release asset checksum mismatch for $($asset.filename): expected $expected, actual $actual"
-            }
+        $actual = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash.ToLowerInvariant()
+        $expected = [string]$asset.sha256
+        if ($actual -ne $expected.ToLowerInvariant()) {
+            throw "release asset checksum mismatch for $($asset.filename): expected $expected, actual $actual"
         }
 
         Expand-Archive -Path $archivePath -DestinationPath $tempDir -Force

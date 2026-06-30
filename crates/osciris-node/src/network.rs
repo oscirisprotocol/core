@@ -120,6 +120,7 @@ pub struct AutoProviderConfig {
     pub signing_key_id: String,
     pub repo_root: PathBuf,
     pub work_root: PathBuf,
+    pub trusted_assigner_public_keys_base64: Vec<String>,
     pub listen_addr: String,
     pub bootstrap_peers: Vec<String>,
     pub presence_interval: Duration,
@@ -677,6 +678,7 @@ pub async fn run_auto_provider(config: &AutoProviderConfig) -> Result<AutoProvid
             )
         })?;
     let signing_key = load_signing_key_from_base64_seed(&config.signing_key_seed_base64)?;
+    let trusted_assigners = trusted_assigners(config)?;
     let mut swarm = build_network_swarm(&signing_key)?;
     let topic = IdentTopic::new(PRESENCE_TOPIC);
     let capability_topic = IdentTopic::new(CAPABILITY_TOPIC);
@@ -903,6 +905,7 @@ pub async fn run_auto_provider(config: &AutoProviderConfig) -> Result<AutoProvid
                                         &identity,
                                         &signing_key,
                                         &capability,
+                                        &trusted_assigners,
                                         announcement.job_id,
                                     )
                                     .await
@@ -969,6 +972,7 @@ pub async fn run_auto_provider(config: &AutoProviderConfig) -> Result<AutoProvid
                                         &identity,
                                         &signing_key,
                                         &capability,
+                                        &trusted_assigners,
                                         assignment.job_id,
                                     )
                                     .await
@@ -1843,6 +1847,7 @@ async fn execute_and_publish_ready_assignments(
             context.identity,
             context.signing_key,
             context.capability,
+            &trusted_assigners(context.config)?,
             assignment.job_id,
         )
         .await
@@ -1875,6 +1880,7 @@ async fn execute_assigned_job_if_ready(
     identity: &NodeIdentity,
     signing_key: &ed25519_dalek::SigningKey,
     capability: &ProviderCapability,
+    trusted_assigners: &BTreeSet<String>,
     job_id: uuid::Uuid,
 ) -> Result<Option<ReceiptAvailability>> {
     let assignment = store.load_job_assignment(&job_id.to_string()).await?;
@@ -1884,6 +1890,7 @@ async fn execute_assigned_job_if_ready(
     if assignment.assigned_provider_node_id != identity.node_id {
         return Ok(None);
     }
+    ensure_assignment_trusted(&assignment, trusted_assigners)?;
     if store
         .load_receipt_availability(&job_id.to_string(), &identity.node_id)
         .await?
@@ -1911,6 +1918,43 @@ async fn execute_assigned_job_if_ready(
         create_receipt_availability_from_evidence(&output.evidence_dir, identity, signing_key)?;
     store.record_receipt_availability(&availability).await?;
     Ok(Some(availability))
+}
+
+fn trusted_assigners(config: &AutoProviderConfig) -> Result<BTreeSet<String>> {
+    if config.trusted_assigner_public_keys_base64.is_empty() {
+        bail!("network run-provider requires at least one --trusted-assigner-public-key-base64");
+    }
+
+    let mut trusted = BTreeSet::new();
+    for key in &config.trusted_assigner_public_keys_base64 {
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        verifying_key_from_base64(key).with_context(|| "invalid trusted assigner public key")?;
+        trusted.insert(key.to_string());
+    }
+
+    if trusted.is_empty() {
+        bail!("network run-provider requires at least one non-empty trusted assigner public key");
+    }
+
+    Ok(trusted)
+}
+
+fn ensure_assignment_trusted(
+    assignment: &JobAssignment,
+    trusted_assigners: &BTreeSet<String>,
+) -> Result<()> {
+    if trusted_assigners.contains(&assignment.assigner_ed25519_public_key_base64) {
+        return Ok(());
+    }
+
+    bail!(
+        "job assignment {} was signed by untrusted assigner {}",
+        assignment.job_id,
+        assignment.assigner_node_id
+    )
 }
 
 fn publish_presence(
@@ -2126,7 +2170,10 @@ async fn verify_and_store_verification_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use osciris_core::{JobType, PrivacyMode, PrivacyPolicy};
+    use osciris_core::{
+        load_signing_key_from_base64_seed, verifying_key_to_base64, JobType, PrivacyMode,
+        PrivacyPolicy,
+    };
 
     fn announcement(required_capability: &str) -> JobAnnouncement {
         let job_spec = osciris_core::JobSpec {
@@ -2187,6 +2234,24 @@ mod tests {
         }
     }
 
+    fn assignment(assigner_public_key: String) -> JobAssignment {
+        JobAssignment {
+            job_id: uuid::Uuid::now_v7(),
+            assigned_provider_node_id: "provider-1".to_string(),
+            assigner_node_id: "enterprise-1".to_string(),
+            assigner_ed25519_public_key_base64: assigner_public_key,
+            assignment_reason: "test".to_string(),
+            assigned_at: "2026-06-04T00:00:00Z".to_string(),
+            signature: "signature".to_string(),
+        }
+    }
+
+    fn trusted_key(byte: u8) -> String {
+        let seed = BASE64.encode([byte; 32]);
+        let signing_key = load_signing_key_from_base64_seed(&seed).unwrap();
+        verifying_key_to_base64(&signing_key.verifying_key())
+    }
+
     #[test]
     fn job_matching_accepts_sufficient_gpu_vram() {
         assert!(job_matches_provider_capability(
@@ -2201,6 +2266,20 @@ mod tests {
             &announcement("gpu>=24gb"),
             &capability(16.0, vec![JobType::LlmLoraEconomics])
         ));
+    }
+
+    #[test]
+    fn assignment_trust_accepts_configured_assigner_key() {
+        let assigner = trusted_key(7);
+        let trusted = BTreeSet::from([assigner.clone()]);
+        ensure_assignment_trusted(&assignment(assigner), &trusted).unwrap();
+    }
+
+    #[test]
+    fn assignment_trust_rejects_unconfigured_assigner_key() {
+        let trusted = BTreeSet::from([trusted_key(7)]);
+        let err = ensure_assignment_trusted(&assignment(trusted_key(8)), &trusted).unwrap_err();
+        assert!(err.to_string().contains("untrusted assigner"));
     }
 
     #[test]

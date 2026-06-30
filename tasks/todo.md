@@ -1,5 +1,103 @@
 # Task Plan
 
+## Fix Protocol CLI Security Findings
+
+### Objective
+
+Close the three reportable protocol CLI security findings from the focused audit.
+
+### Spec
+
+- Make Unix and Windows bootstrap clients fail closed when a selected manifest
+  asset has no SHA-256 checksum.
+- Stop using manifest-controlled filenames as local download paths; require
+  strict basename-safe archive names and download to fixed temp filenames.
+- Add an explicit trusted assigner public-key allowlist to auto-provider
+  execution and require it for `network run-provider`.
+- Keep changes minimal and compatible with existing beta release artifacts.
+
+### Checklist
+
+- [x] Harden Bash bootstrap checksum and filename handling
+- [x] Harden PowerShell bootstrap checksum and filename handling
+- [x] Add trusted assigner enforcement to auto-provider execution
+- [x] Update CLI/docs/task notes for new provider flag
+- [x] Run targeted tests and syntax checks
+
+### Review
+
+- `scripts/bootstrap_beta_collaboration.sh` now requires a selected asset to
+  include a valid 64-character SHA-256 checksum, validates the manifest
+  filename as a safe basename, and downloads to a fixed temp archive path.
+- `scripts/bootstrap_beta_collaboration.ps1` now applies the same checksum and
+  filename controls for the Windows zip path and downloads to a fixed temp zip.
+- `network run-provider` now requires
+  `--trusted-assigner-public-key-base64`; auto-provider execution rejects
+  assignments signed by keys outside that configured trust set.
+- Updated provider runbook examples to include the trusted assigner key flag.
+- Verification run:
+  - `cargo fmt --check`
+  - `bash -n scripts/bootstrap_beta_collaboration.sh`
+  - `bash -n scripts/package_beta_release.sh`
+  - `bash -n scripts/run_beta_release_flow.sh`
+  - synthetic Bash bootstrap missing-SHA256 manifest rejection
+  - synthetic Bash bootstrap unsafe filename rejection with no escaped file
+    written
+  - `cargo test -p osciris-node job_matching -- --nocapture`
+  - `cargo test -p osciris-node assignment_trust -- --nocapture`
+  - `cargo test -p osciris-node --lib`
+  - `cargo check -p osciris-cli --bin osciris-node`
+  - `python3 scripts/verify_beta_release_surface.py --base-url https://oscirislabs.com --release-manifest-only`
+- PowerShell syntax validation was not run locally because `pwsh` is not
+  installed on this macOS host.
+
+## Audit Protocol CLI Security Surface
+
+### Objective
+
+Assess the OSCIRIS protocol CLI and directly related beta release/bootstrap
+surface for exploitable security issues.
+
+### Spec
+
+- Scope the audit to `crates/osciris-cli`, release/update/bootstrap scripts,
+  release workflow packaging, and beta docs that define expected behavior.
+- Follow the Codex Security phased structure: threat model, finding discovery,
+  validation, attack-path analysis, and final report.
+- Prioritize update/install risks, malicious manifests, archive extraction,
+  checksum verification, command execution, filesystem writes, path handling,
+  credential leakage, and provider/proof trust boundaries.
+- Do not edit source code during the audit unless explicitly asked for fixes.
+
+### Checklist
+
+- [x] Generate or reuse repository threat model
+- [x] Discover candidate findings in CLI and release/bootstrap surfaces
+- [x] Validate candidates against concrete attacker control and impact
+- [x] Analyze attack paths and severity for surviving findings
+- [x] Document final audit results and verification commands
+
+### Review
+
+- Completed a focused Codex Security-style scoped audit for the protocol CLI,
+  directly invoked runtime crates, and beta release/bootstrap scripts.
+- Exhaustive multi-worker scan preflight could not prove worker capacity from
+  runtime/config, so this result is intentionally scoped rather than claimed as
+  exhaustive repository-wide coverage.
+- Final report:
+  `/var/folders/3b/5q3fv8gd5hjd0bxnv0fyc4r40000gn/T/codex-security-scans/protocol-rs/6d093da_20260629T235105Z/report.md`
+- Reportable findings:
+  - P1 High: bootstrap installers trust unsigned manifest-controlled binary URLs
+    and checksums.
+  - P2 Medium: auto-provider executes arbitrary signed mesh jobs without an
+    authorization trust root.
+  - P2 Medium: manifest-controlled asset filename can write downloads outside
+    bootstrap temp directories.
+- Verification run:
+  - `cargo test -p osciris-node job_matches_provider_capability -- --nocapture`
+  - `cargo test -p osciris-cli signed_verification_receipt_import_rejects_tampering -- --nocapture`
+  - local path traversal simulation for bootstrap `asset.filename`
+
 ## Guard Public Beta Manifest Publication
 
 ### Objective
