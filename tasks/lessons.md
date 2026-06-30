@@ -6,3 +6,6 @@
 - When pushing workflow file changes, ensure the workspace is using credentials
   with GitHub `workflow` write scope or use the repo SSH remote up front; plain
   HTTPS OAuth tokens may allow normal pushes but reject workflow updates.
+- Treat GitHub repositories, releases, and raw repository artifacts as the
+  OSCIRIS publication authority. Railway is only a website runtime or mirror
+  and must not be described as blocking publication.

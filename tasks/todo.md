@@ -73,6 +73,9 @@ clear, evidence-bounded hardware requirements source.
 - The downloaded macOS release binary reports `osciris-node 0.1.1`.
 - The public hardware requirements are available at
   `https://github.com/oscirisprotocol/core/blob/main/docs/hardware_requirements.md`.
+- GitHub repositories, releases, and raw repository artifacts are the
+  publication authority. Website hosting runtimes such as Railway do not gate
+  publication.
 
 ## Publish Safety, Participant Warnings, And License (Superseded)
 
