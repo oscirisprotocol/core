@@ -1,5 +1,74 @@
 # Task Plan
 
+## Cross-Platform OSCIRIS Node Desktop Foundation
+
+### Objective
+
+Create the first real desktop vertical slice for macOS, Windows, and Linux:
+a versioned per-user daemon API plus a Tauri GUI that starts the daemon, reads
+real process state, and pauses or resumes participation without duplicating
+protocol logic in the frontend.
+
+### Architecture
+
+- Add `osciris-daemon` as the long-running local owner of node state.
+- Use a per-user Unix socket on macOS/Linux and named pipe on Windows.
+- Use bounded, newline-framed JSON with an explicit API version.
+- Keep signing material and filesystem access out of the webview.
+- Let the Tauri Rust layer expose only typed daemon operations.
+- Keep the frontend local-only with a restrictive CSP and no remote content.
+- Treat the desktop app as a controller; closing its window must not define
+  network participation state.
+
+### Desktop MVP
+
+- Node status: daemon version, uptime, participation mode, and network state.
+- Controls: launch daemon, retry connection, pause, and resume.
+- Honest pending states for identity, hardware, model profiles, jobs, receipts,
+  and readiness until their APIs are implemented.
+- Light technical visual system using OSCIRIS cyan, warm white surfaces,
+  hairline borders, restrained motion, and mono status metadata.
+
+### Checklist
+
+- [x] Add versioned daemon request/response types
+- [x] Add secure cross-platform per-user IPC server and client
+- [x] Persist participation mode atomically
+- [x] Add daemon protocol and transport tests
+- [x] Scaffold Tauri 2, React, TypeScript, and Vite desktop app
+- [x] Connect launch, status, pause, and resume controls
+- [x] Add responsive desktop dashboard and offline/error states
+- [x] Bundle the target-native daemon with the desktop app
+- [x] Add desktop architecture and development documentation
+- [x] Add macOS, Linux, and Windows desktop CI
+- [x] Verify Rust workspace tests, frontend build, and native macOS bundle
+- [x] Review security boundaries and changed-file scope
+
+### Review
+
+- Added `osciris-daemon` with API v1, bounded newline-framed JSON, request IDs,
+  constant-time credential checks, and fail-closed participation defaults.
+- Added mode `0600` Unix sockets under mode `0700` per-user state directories
+  and local-only Windows named pipes.
+- Persisted participation state atomically and kept identity, hardware,
+  network, jobs, receipts, and readiness explicitly pending until measured APIs
+  exist.
+- Added a Tauri 2 desktop controller with only typed status, launch, pause, and
+  resume commands. React has no shell, filesystem, network, or secret access.
+- Added host-target sidecar preparation. Native packages embed the daemon,
+  Apache-2.0 `LICENSE`, and `NOTICE`.
+- Added a three-platform desktop workflow for daemon tests, frontend builds,
+  sidecar preparation, and Tauri bridge compilation.
+- Verification passed:
+  - `cargo test --workspace --locked`: 67 tests passed
+  - strict Clippy for the protocol workspace and Tauri workspace
+  - production frontend build: 199.13 kB JavaScript, 62.65 kB gzip
+  - `pnpm audit --prod`: no known vulnerabilities
+  - macOS arm64 `.app` build with both native executables
+  - packaged daemon reports `osciris-daemon 0.1.1`
+  - packaged `LICENSE` and `NOTICE` match repository files byte-for-byte
+  - responsive check at `860x620`: no horizontal overflow or browser errors
+
 ## Provider-Local Inference Round-Trip Milestone
 
 ### Objective
@@ -17,7 +86,7 @@ central inference server.
 - [x] Separate currently working commands from commands that must be implemented
 - [x] Define observable quorum and capacity-gap acceptance criteria
 - [x] Link the runbook from README and milestone documentation
-- [ ] Create the GitHub milestone and scoped implementation issues
+- [x] Create the GitHub milestone and scoped implementation issues
 - [x] Verify links, command references, changed-file scope, and repository tests
 
 ### Review

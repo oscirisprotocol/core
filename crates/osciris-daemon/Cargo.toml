@@ -1,0 +1,32 @@
+[package]
+name = "osciris-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "osciris_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "osciris-daemon"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+atomic-write-file.workspace = true
+base64.workspace = true
+clap.workspace = true
+futures.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subtle.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -50,7 +50,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for crate in osciris-chain osciris-cli osciris-core osciris-node osciris-verifier; do
+          for crate in osciris-chain osciris-cli osciris-core osciris-daemon osciris-node osciris-verifier; do
             cmp LICENSE "crates/${crate}/LICENSE"
             cmp NOTICE "crates/${crate}/NOTICE"
           done

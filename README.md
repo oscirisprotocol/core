@@ -311,6 +311,10 @@ Provider-local inference round trip:
 
 [docs/milestones/provider_local_inference_roundtrip.md](docs/milestones/provider_local_inference_roundtrip.md)
 
+Cross-platform node desktop architecture:
+
+[docs/desktop_node_architecture.md](docs/desktop_node_architecture.md)
+
 ## Related Components
 
 - DSP engine and benchmarks: private internal repository, summarized publicly in the

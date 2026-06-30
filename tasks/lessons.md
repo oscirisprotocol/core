@@ -16,3 +16,7 @@
   OSCIRIS. Each participant stores and serves the pinned model on its own
   machine; OSCIRIS coordinates discovery, assignment, receipts, verification,
   and published network status.
+- A desktop controller is not distributable when its daemon exists only in the
+  developer workspace. Bundle the target-native daemon as a fixed sidecar and
+  verify the installed artifact contains it before presenting launch controls
+  as complete.
