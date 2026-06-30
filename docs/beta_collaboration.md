@@ -106,9 +106,10 @@ and participate through the CLI.
 ## Provider hardware guidance
 
 OSCIRIS supports heterogeneous participants. Joining the developer beta does
-not require a GPU. The current evidence-backed GPU-worker minimum is 24 GB VRAM
-on Linux/NVIDIA CUDA. Lower-VRAM hosts may publish capability, but are not
-promised GPU jobs until smaller profiles are tested and published.
+not require a GPU. The current evidence-backed 7B CUDA profile baseline is
+24 GB VRAM on Linux/NVIDIA CUDA. NVIDIA, AMD, and Apple Silicon hosts may
+publish capability at other memory sizes and receive compatible targeted jobs;
+benchmark status limits performance claims, not network admission.
 
 Read [hardware requirements](hardware_requirements.md) before publishing a
 provider capability. It defines role minimums, GPU tiers, platform support, and
@@ -117,6 +118,8 @@ the current A10G/L40S evidence boundary.
 CUDA is required only for CUDA-specific jobs. Apple Silicon providers should
 advertise `mps_available=true`, `cuda_available=false`, and runtimes such as
 `python3`, `mps`, or `mlx` when those paths are locally available.
+AMD providers should advertise both CUDA and MPS as unavailable and include
+`python3` and `rocm` only when the ROCm path passes a local smoke test.
 
 ## Participant warnings
 

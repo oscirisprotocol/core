@@ -21,6 +21,26 @@ control-plane roles. For the current 7B GPU beta, use 8 CPU cores, 32 GB system
 RAM, and a 160 GB SSD as the operational baseline provisioned for the completed
 A10G adaptation runs.
 
+## Platform minimums and benchmark status
+
+All three platforms may join the network and publish signed capability. The
+24 GB values describe the current 7B workload class; they are not a minimum for
+joining, and lower-memory nodes may be targeted by smaller compatible jobs.
+
+| Platform | Minimum to join | Current 7B profile baseline | Runtime declaration | OSCIRIS benchmark status | Job targeting |
+| --- | --- | --- | --- | --- | --- |
+| NVIDIA on Linux | Supported binary and truthful capability declaration; no GPU-memory minimum to join | CUDA-capable NVIDIA GPU with at least 24 GB VRAM; 8 CPU cores, 32 GB RAM, 160 GB SSD | `cuda_available=true`; runtimes include `python3` and `cuda` | Verified on A10G 24 GB for bounded 3B inference and 7B QLoRA; verified on L40S 48 GB for bounded 7B inference | Target CUDA jobs by job type and declared VRAM after a local smoke test |
+| AMD on Linux | Supported binary and truthful capability declaration; no GPU-memory minimum to join | ROCm-supported AMD GPU with at least 24 GB VRAM as the first 7B profile baseline; 8 CPU cores, 32 GB RAM, 160 GB SSD | runtimes include `python3` and `rocm`; do not set CUDA or MPS | No published OSCIRIS ROCm performance benchmark | Accepted; target only ROCm-compatible jobs that fit the declared model and VRAM |
+| Apple Silicon MacBook | Apple Silicon, supported macOS binary, and truthful capability declaration; no unified-memory minimum to join | At least 24 GB unified memory as the first 7B profile baseline; 8 CPU cores, 80 GB free SSD space | `mps_available=true`; runtimes include `python3` plus `mps` or `mlx` | No published OSCIRIS MPS or MLX performance benchmark | Accepted; target only MPS/MLX-compatible jobs that fit declared unified memory |
+
+Capability declarations make AMD and Apple providers addressable before
+OSCIRIS publishes comparative performance benchmarks. The current matcher
+checks job type and declared memory, but does not yet enforce runtime labels;
+operators must therefore target CUDA, ROCm, MPS, and MLX job profiles
+explicitly. The AMD and Apple 24 GB baselines may change after measured model
+fit, peak memory, throughput, thermals, and receipt reproducibility are
+published.
+
 ## Evidence-backed GPU tiers
 
 | Workload tier | Tested accelerator | What is established |
@@ -55,8 +75,10 @@ runtime locally and assign only workloads that fit the provider.
 - Windows x86_64 NVIDIA binaries are published for beta smoke testing; Windows
   GPU execution is not yet a production-readiness claim.
 - macOS Apple Silicon can run the CLI and control-plane roles. MPS/MLX GPU
-  workload minimums are not yet established by published OSCIRIS benchmarks.
-- AMD ROCm is not a published beta execution target yet.
+  providers are accepted through declared capability and can be targeted by
+  compatible jobs. Comparative performance minimums are not yet established.
+- AMD ROCm providers are accepted through declared runtime and hardware
+  capability. Comparative performance minimums are not yet established.
 
 ## Capability publication
 

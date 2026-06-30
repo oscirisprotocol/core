@@ -62,9 +62,9 @@ Recommended public wording:
 
 > OSCIRIS is opening a developer beta for heterogeneous private AI compute
 > coordination across macOS, Linux, and Windows. Providers may participate
-> using CPU, Apple Silicon/MPS, or NVIDIA CUDA hosts, with workload routing
-> based on declared and verified capability. CUDA is required only for
-> CUDA-specific workloads.
+> using CPU, Apple Silicon/MPS or MLX, AMD ROCm, or NVIDIA CUDA hosts, with
+> workload routing based on declared and verified capability. Accelerator
+> runtimes are required only for jobs targeting those runtimes.
 
 ## Participant Warnings
 
@@ -75,9 +75,9 @@ Read this before running a provider, verifier, or enterprise client:
   classified data unless a separate written review authorizes that use.
 - Provider capability claims are signed and checked, but they are not the same
   as full hardware attestation.
-- CPU, Apple Silicon, and NVIDIA CUDA hosts can participate. Current automatic
-  matching checks job type and declared VRAM; operators must validate the
-  complete runtime before accepting work.
+- CPU, Apple Silicon, AMD ROCm, and NVIDIA CUDA hosts can participate. Current
+  automatic matching checks job type and declared memory; operators must
+  validate the complete runtime before accepting work.
 - NVIDIA CUDA support does not mean every Windows NVIDIA host is production
   ready; Windows GPU providers still need host smoke testing before stronger
   public claims.
@@ -94,9 +94,10 @@ Read this before running a provider, verifier, or enterprise client:
 ## Provider Hardware Requirements
 
 Joining the developer beta does not require a GPU. The current evidence-backed
-GPU-worker minimum is 24 GB VRAM on Linux/NVIDIA CUDA. Lower-VRAM hosts may
-publish capability, but are not promised GPU jobs until smaller profiles are
-tested and published.
+7B CUDA profile baseline is 24 GB VRAM on Linux/NVIDIA CUDA. NVIDIA, AMD, and
+Apple Silicon hosts may publish capability at other memory sizes and receive
+compatible targeted jobs; benchmark status limits performance claims, not
+network admission.
 
 See [hardware requirements](docs/hardware_requirements.md) for role minimums,
 GPU tiers, platform support, and the current A10G/L40S evidence boundary.
