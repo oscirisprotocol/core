@@ -1,5 +1,39 @@
 # Task Plan
 
+## Cross-Platform GPU Requirements Table
+
+### Objective
+
+Publish a single contributor-facing table covering NVIDIA, AMD, and Apple
+Silicon while separating network acceptance from published performance
+evidence.
+
+### Checklist
+
+- [x] Review current runtime support and published benchmark evidence
+- [x] Add NVIDIA, AMD, and Apple Silicon platform rows
+- [x] Separate network admission, workload profiles, and benchmark status
+- [x] State current GPU-job eligibility for every platform
+- [x] Align README and beta collaboration guidance with capability-based admission
+- [x] Verify Markdown structure and changed-file scope
+
+### Review
+
+- Any supported node may join and publish truthful capability; there is no GPU
+  or memory minimum for network admission.
+- The current 7B CUDA profile baseline remains Linux x86_64 with NVIDIA CUDA
+  and at least 24 GB VRAM.
+- NVIDIA evidence covers A10G 24 GB for bounded 3B inference and 7B QLoRA, and
+  L40S 48 GB for bounded 7B inference.
+- AMD ROCm and Apple Silicon MPS/MLX have no published OSCIRIS GPU benchmark.
+  Their 24 GB values are first 7B profile baselines, not admission minimums.
+- AMD and Apple Silicon providers are accepted through declared capability and
+  can be targeted by compatible jobs. Current automatic matching still
+  requires operator-side runtime filtering.
+- Verification passed: table structure, local Markdown links, stale exclusion
+  wording scan, `git diff --check`, and `cargo test --workspace --locked`
+  (62 tests).
+
 ## Apache-2.0 And GPU Hardware Publication
 
 ### Objective

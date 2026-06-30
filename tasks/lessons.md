@@ -9,3 +9,6 @@
 - Treat GitHub repositories, releases, and raw repository artifacts as the
   OSCIRIS publication authority. Railway is only a website runtime or mirror
   and must not be described as blocking publication.
+- Do not equate missing platform benchmarks with protocol exclusion. OSCIRIS
+  accepts heterogeneous nodes through signed capability declarations; benchmark
+  evidence limits performance claims, while job profiles determine targeting.
