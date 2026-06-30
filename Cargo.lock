@@ -4039,7 +4039,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "osciris-chain"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "alloy",
  "anyhow",
@@ -4055,7 +4055,7 @@ dependencies = [
 
 [[package]]
 name = "osciris-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "alloy",
  "anyhow",
@@ -4082,7 +4082,7 @@ dependencies = [
 
 [[package]]
 name = "osciris-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "chrono",
@@ -4098,7 +4098,7 @@ dependencies = [
 
 [[package]]
 name = "osciris-node"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4123,7 +4123,7 @@ dependencies = [
 
 [[package]]
 name = "osciris-verifier"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64",

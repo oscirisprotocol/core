@@ -1,6 +1,69 @@
 # Task Plan
 
-## Publish Safety, Participant Warnings, And License
+## Apache-2.0 And GPU Hardware Publication
+
+### Objective
+
+Publish OSCIRIS Core under Apache License 2.0 and give beta contributors one
+clear, evidence-bounded hardware requirements source.
+
+### Spec
+
+- Replace the current MIT license with the canonical Apache License 2.0 text.
+- Align Cargo metadata, README license wording, and NOTICE with Apache-2.0.
+- Include `LICENSE` and `NOTICE` in crate packages and binary release archives.
+- Preserve `v0.1.0` as the historical MIT boundary and make `v0.1.1` the first
+  Apache-2.0 release.
+- Keep OSCIRIS names, logos, hosted services, commercial terms, rewards, and
+  SLAs outside the software license grant.
+- Publish one canonical hardware requirements document.
+- Distinguish CLI/control participation from GPU worker eligibility.
+- Document that current matching enforces job type and declared VRAM, not the
+  complete accelerator runtime.
+- Mark 24 GB VRAM as the evidence-backed floor for the current GPU beta.
+- Keep lower-VRAM participation explicitly unpromised until smaller job
+  profiles are tested and published.
+
+### Checklist
+
+- [x] Complete Apache-2.0 migration across license and metadata surfaces
+- [x] Add canonical GPU hardware requirements
+- [x] Replace duplicated hardware tables with links to the canonical document
+- [x] Verify license references, Markdown links, Cargo metadata, and tests
+
+### Review
+
+- Replaced the root MIT license with the canonical Apache License 2.0 text and
+  changed all workspace crate metadata to `Apache-2.0`.
+- Set workspace version `0.1.1` as the first Apache-era source/release boundary;
+  the already-published `v0.1.0` artifacts remain historically MIT-licensed.
+- Reduced `NOTICE` to attribution and moved marks and service boundaries to
+  `TRADEMARKS.md`.
+- Added matching `LICENSE` and `NOTICE` files to every crate package and made
+  CI fail if those copies drift from the repository files.
+- Updated deterministic macOS, Linux, and Windows release packaging to include
+  the binary, `LICENSE`, and `NOTICE`; the release verifier now rejects
+  archives missing either legal file.
+- Added `docs/hardware_requirements.md` as the canonical requirements source.
+  It separates non-GPU participation from the evidence-backed current GPU
+  floor: Linux/NVIDIA CUDA with 24 GB VRAM for current beta work.
+- Kept lower-VRAM participation explicitly unpromised until smaller job
+  profiles are tested. The document also states that current automatic
+  matching checks job type and VRAM, not the complete runtime.
+- Verification passed:
+  - canonical Apache text byte comparison
+  - Apache metadata for all five workspace crates
+  - `LICENSE` and `NOTICE` inclusion in all five crate packages
+  - Bash syntax and Python parser checks
+  - local Markdown link audit
+  - deterministic tar and zip reproduction
+  - positive three-platform archive verification
+  - negative rejection of an archive missing `LICENSE` and `NOTICE`
+  - `cargo test --workspace --locked`: 62 tests passed
+- Before publishing `v0.1.1`, OSCIRIS Labs must confirm it owns or has consent
+  to relicense every contribution included in the release.
+
+## Publish Safety, Participant Warnings, And License (Superseded)
 
 ### Objective
 
@@ -23,6 +86,8 @@ beta warnings, heterogeneous hardware participation, and the effective license.
 
 ### Review
 
+- Historical note: this section records the license state before the
+  Apache-2.0 migration. It is superseded by the plan above.
 - The repo remains MIT-licensed because the workspace metadata already declared
   `license = "MIT"`. A root `LICENSE` now makes that explicit for public GitHub
   consumers.

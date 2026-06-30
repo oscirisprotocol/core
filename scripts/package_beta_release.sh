@@ -40,7 +40,7 @@ sha256_file() {
 }
 
 create_deterministic_tarball() {
-  python3 - "$1" "$2" <<'PY'
+  python3 - "$1" "$2" "$3" "$4" <<'PY'
 import gzip
 import io
 import tarfile
@@ -49,37 +49,52 @@ import sys
 
 binary_path = Path(sys.argv[1])
 archive_path = Path(sys.argv[2])
-payload = binary_path.read_bytes()
+license_path = Path(sys.argv[3])
+notice_path = Path(sys.argv[4])
+members = (
+    ("osciris-node", binary_path.read_bytes(), 0o755),
+    ("LICENSE", license_path.read_bytes(), 0o644),
+    ("NOTICE", notice_path.read_bytes(), 0o644),
+)
 
 with archive_path.open("wb") as raw_file:
     with gzip.GzipFile(filename="", mode="wb", fileobj=raw_file, mtime=0) as gz_file:
         with tarfile.open(fileobj=gz_file, mode="w") as archive:
-            info = tarfile.TarInfo(name="osciris-node")
-            info.size = len(payload)
-            info.mode = 0o755
-            info.mtime = 0
-            info.uid = 0
-            info.gid = 0
-            info.uname = ""
-            info.gname = ""
-            archive.addfile(info, io.BytesIO(payload))
+            for name, payload, mode in members:
+                info = tarfile.TarInfo(name=name)
+                info.size = len(payload)
+                info.mode = mode
+                info.mtime = 0
+                info.uid = 0
+                info.gid = 0
+                info.uname = ""
+                info.gname = ""
+                archive.addfile(info, io.BytesIO(payload))
 PY
 }
 
 create_deterministic_zip() {
-  python3 - "$1" "$2" <<'PY'
+  python3 - "$1" "$2" "$3" "$4" <<'PY'
 from pathlib import Path
 import sys
 import zipfile
 
 binary_path = Path(sys.argv[1])
 archive_path = Path(sys.argv[2])
-info = zipfile.ZipInfo("osciris-node.exe", date_time=(1980, 1, 1, 0, 0, 0))
-info.compress_type = zipfile.ZIP_DEFLATED
-info.external_attr = 0o755 << 16
+license_path = Path(sys.argv[3])
+notice_path = Path(sys.argv[4])
+members = (
+    ("osciris-node.exe", binary_path.read_bytes(), 0o755),
+    ("LICENSE", license_path.read_bytes(), 0o644),
+    ("NOTICE", notice_path.read_bytes(), 0o644),
+)
 
 with zipfile.ZipFile(archive_path, "w") as archive:
-    archive.writestr(info, binary_path.read_bytes())
+    for name, payload, mode in members:
+        info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.external_attr = mode << 16
+        archive.writestr(info, payload)
 PY
 }
 
@@ -87,11 +102,11 @@ usage() {
   cat <<'EOF'
 Usage:
   bash scripts/package_beta_release.sh \
-    --version 0.1.0 \
+    --version 0.1.1 \
     --channel beta \
-    --release-page-url https://github.com/oscirisprotocol/core/releases/tag/v0.1.0 \
+    --release-page-url https://github.com/oscirisprotocol/core/releases/tag/v0.1.1 \
     --release-notes "Beta collaboration release" \
-    --base-download-url https://github.com/oscirisprotocol/core/releases/download/v0.1.0 \
+    --base-download-url https://github.com/oscirisprotocol/core/releases/download/v0.1.1 \
     --asset macos-aarch64=/path/to/osciris-node \
     [--asset linux-x86_64=/path/to/osciris-node] \
     [--asset windows-x86_64=/path/to/osciris-node.exe] \
@@ -223,9 +238,17 @@ for spec in "${asset_args[@]}"; do
 
   archive_path="${output_dir}/${filename}"
   if [[ "$platform" == windows-* ]]; then
-    create_deterministic_zip "${tar_root}/${binary_name}" "$archive_path"
+    create_deterministic_zip \
+      "${tar_root}/${binary_name}" \
+      "$archive_path" \
+      "${REPO_ROOT}/LICENSE" \
+      "${REPO_ROOT}/NOTICE"
   else
-    create_deterministic_tarball "${tar_root}/${binary_name}" "$archive_path"
+    create_deterministic_tarball \
+      "${tar_root}/${binary_name}" \
+      "$archive_path" \
+      "${REPO_ROOT}/LICENSE" \
+      "${REPO_ROOT}/NOTICE"
   fi
   checksum="$(sha256_file "$archive_path")"
 

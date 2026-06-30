@@ -46,21 +46,31 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Verify packaged legal files
+        shell: bash
+        run: |
+          set -euo pipefail
+          for crate in osciris-chain osciris-cli osciris-core osciris-node osciris-verifier; do
+            cmp LICENSE "crates/${crate}/LICENSE"
+            cmp NOTICE "crates/${crate}/NOTICE"
+          done
+
       - name: Build release binary
         run: cargo build --locked --release -p osciris-cli --bin osciris-node --target ${{ matrix.target }}
 
-      - name: Stage release binary
+      - name: Stage release files
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release-binaries
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "release-binaries/${{ matrix.binary }}"
+          cp LICENSE NOTICE release-binaries/
 
-      - name: Upload release binary
+      - name: Upload release files
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}
-          path: release-binaries/${{ matrix.binary }}
+          path: release-binaries/
 
   release:
     name: Publish GitHub Release
