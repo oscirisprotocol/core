@@ -60,8 +60,19 @@ clear, evidence-bounded hardware requirements source.
   - positive three-platform archive verification
   - negative rejection of an archive missing `LICENSE` and `NOTICE`
   - `cargo test --workspace --locked`: 62 tests passed
-- Before publishing `v0.1.1`, OSCIRIS Labs must confirm it owns or has consent
-  to relicense every contribution included in the release.
+- Git history ownership review showed one contributor identity:
+  `MESHACH ISHAYA <meshach@ashinity.com>`.
+- Publication completed:
+  - pull request: `https://github.com/oscirisprotocol/core/pull/4`
+  - merge commit: `5e5694e751a70f8549abf8c3149019f28c515f5d`
+  - release: `https://github.com/oscirisprotocol/core/releases/tag/v0.1.1`
+  - release workflow: `https://github.com/oscirisprotocol/core/actions/runs/28414760251`
+- The release workflow passed for macOS, Linux, and Windows. Verification
+  downloaded the public assets, matched every SHA-256 digest, and confirmed
+  that each archive contains its binary, `LICENSE`, and `NOTICE`.
+- The downloaded macOS release binary reports `osciris-node 0.1.1`.
+- The public hardware requirements are available at
+  `https://github.com/oscirisprotocol/core/blob/main/docs/hardware_requirements.md`.
 
 ## Publish Safety, Participant Warnings, And License (Superseded)
 
