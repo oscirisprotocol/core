@@ -303,6 +303,14 @@ Horizen testnet integration:
 
 [docs/horizen_mvp_integration.md](docs/horizen_mvp_integration.md)
 
+Implementation milestones:
+
+[docs/milestones/README.md](docs/milestones/README.md)
+
+Provider-local inference round trip:
+
+[docs/milestones/provider_local_inference_roundtrip.md](docs/milestones/provider_local_inference_roundtrip.md)
+
 ## Related Components
 
 - DSP engine and benchmarks: private internal repository, summarized publicly in the
