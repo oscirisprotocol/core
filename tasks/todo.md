@@ -1,5 +1,39 @@
 # Task Plan
 
+## Provider-Local Inference Round-Trip Milestone
+
+### Objective
+
+Publish a practical, testable milestone for sending an inference request from a
+developer machine to an eligible OSCIRIS peer, executing Qwen3-4B locally on
+that peer, and returning a signed result and verifiable receipt without a
+central inference server.
+
+### Checklist
+
+- [x] Audit existing job, provider, P2P receipt, verifier, and milestone commands
+- [x] Define the pinned model profile and hardware envelope
+- [x] Document the end-to-end operator run and trust boundary
+- [x] Separate currently working commands from commands that must be implemented
+- [x] Define observable quorum and capacity-gap acceptance criteria
+- [x] Link the runbook from README and milestone documentation
+- [ ] Create the GitHub milestone and scoped implementation issues
+- [x] Verify links, command references, changed-file scope, and repository tests
+
+### Review
+
+- Added `docs/milestones/provider_local_inference_roundtrip.md` as the
+  implementation contract for developer-to-peer-to-developer inference.
+- Pinned the official Qwen3-4B Q4_K_M artifact by repository revision,
+  filename, size, and SHA-256.
+- Separated working v0.1.1 primitives from the proposed interactive inference
+  CLI so future commands are not presented as released.
+- Defined provider-local execution, prompt/result privacy boundaries,
+  capability matching requirements, capacity gaps, verifier quorum, a
+  multi-host test, and completion evidence.
+- Verification passed: local Markdown links, upstream model metadata,
+  `git diff --check`, and `cargo test --workspace --locked` (62 tests).
+
 ## Cross-Platform GPU Requirements Table
 
 ### Objective
