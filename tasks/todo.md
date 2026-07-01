@@ -1,5 +1,47 @@
 # Task Plan
 
+## Desktop Protocol Status Sync
+
+### Objective
+
+Expose backend assignment and receipt state to the desktop so published jobs
+can visibly progress beyond queued when protocol records exist.
+
+### Spec
+
+- Add a daemon command that reads the daemon-owned protocol store.
+- Reflect stored job assignments as assigned provider and running state.
+- Reflect receipt availability and receipt bundles as evidence/verifying state.
+- Reflect verification quorum as completed state when the required verifier
+  count is met.
+- Expose a desktop action to manually sync protocol state.
+- Keep execution itself backend-owned; desktop only observes and updates local
+  job state from protocol records.
+
+### Checklist
+
+- [x] Add daemon protocol refresh command
+- [x] Add protocol assignment/status refresh tests
+- [x] Add Tauri and TypeScript bindings
+- [x] Add desktop Sync protocol action
+- [x] Verify daemon tests, clippy, frontend build, and native bundle
+- [ ] Commit and push
+
+### Review
+
+- Added `RefreshProtocolJobs` to the daemon IPC protocol.
+- `refresh_protocol_jobs` now reads local protocol assignments, receipt
+  availability, bundles, and verification receipts.
+- Desktop jobs update to `matching`, `running`, `verifying`, or `completed`
+  based on actual protocol records.
+- Added Tauri/TypeScript bindings and a top-bar `Sync protocol` action.
+- Verification passed:
+  - `cargo test -p osciris-daemon refresh_protocol_jobs_reflects_assignment --locked`
+  - `cargo test -p osciris-daemon --locked`
+  - `cargo clippy -p osciris-daemon --locked --all-targets -- -D warnings`
+  - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop tauri build`
+
 ## Desktop Protocol Publication Bridge
 
 ### Objective

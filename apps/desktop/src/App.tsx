@@ -9,6 +9,7 @@ import {
   launchDaemon,
   prepareWithdrawal,
   publishJob,
+  refreshProtocolJobs,
   refreshWallet,
   setParticipation,
   submitJob,
@@ -91,6 +92,12 @@ export default function App() {
       setConnection("offline");
       if (showError) setError(String(requestError));
     }
+  }
+
+  async function refreshProtocol() {
+    await runAction(refreshProtocolJobs, (nextWorkspace) => {
+      setWorkspace(nextWorkspace);
+    });
   }
 
   useEffect(() => {
@@ -214,6 +221,16 @@ export default function App() {
               </button>
             ) : (
               <button
+                className="secondary-button"
+                disabled={busy}
+                onClick={() => void refreshProtocol()}
+                type="button"
+              >
+                Sync protocol
+              </button>
+            )}
+            {!daemonLive ? null : (
+              <button
                 aria-label="Refresh workspace"
                 className="icon-button"
                 onClick={() => void refreshAll(true)}
@@ -264,7 +281,10 @@ export default function App() {
                 void runAction(() => submitJob(jobId), () => setSelectedJobId(jobId))
               }
               onPublish={(jobId) =>
-                void runAction(() => publishJob(jobId), () => setSelectedJobId(jobId))
+                void runAction(() => publishJob(jobId), async () => {
+                  setSelectedJobId(jobId);
+                  await refreshProtocol();
+                })
               }
               busy={busy}
             />

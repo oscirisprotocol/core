@@ -33,6 +33,7 @@ use osciris_core::{
     load_signing_key_from_base64_seed, sign_job_announcement, verifying_key_to_base64,
     JobAnnouncement, JobSpec, JobType, PrivacyMode, PrivacyPolicy,
 };
+use osciris_node::status::calculate_quorum_status;
 use osciris_node::store::ProtocolStore;
 
 pub const API_VERSION: u16 = 1;
@@ -169,6 +170,7 @@ pub enum DaemonCommand {
     CreateJob { input: CreateJobInput },
     SubmitJob { job_id: String },
     PublishJob { job_id: String },
+    RefreshProtocolJobs,
     ConfigureWallet { input: WalletConfigInput },
     RefreshWallet,
     PrepareWithdrawal { input: WithdrawalInput },
@@ -521,6 +523,16 @@ impl DaemonService {
                     error.to_string(),
                 ),
             },
+            DaemonCommand::RefreshProtocolJobs => match self.refresh_protocol_jobs().await {
+                Ok(workspace) => {
+                    DaemonResponse::success(request.request_id, DaemonResult::Workspace(workspace))
+                }
+                Err(error) => DaemonResponse::error(
+                    request.request_id,
+                    "protocol_refresh_failed",
+                    error.to_string(),
+                ),
+            },
             DaemonCommand::ConfigureWallet { input } => match self.configure_wallet(input).await {
                 Ok(wallet) => {
                     DaemonResponse::success(request.request_id, DaemonResult::Wallet(wallet))
@@ -690,6 +702,87 @@ impl DaemonService {
         let job = job.clone();
         persist_state(&self.inner.state_dir, &state)?;
         Ok(job)
+    }
+
+    async fn refresh_protocol_jobs(&self) -> Result<WorkspaceSnapshot> {
+        let protocol_store = ProtocolStore::open(&self.inner.state_dir.join("protocol"))
+            .await
+            .context("open daemon protocol store")?;
+        let mut state = self.inner.state.write().await;
+        for job in &mut state.jobs {
+            let Ok(job_id) = uuid::Uuid::parse_str(&job.job_id) else {
+                continue;
+            };
+            let assignment = protocol_store
+                .load_job_assignment(&job.job_id)
+                .await
+                .context("load protocol job assignment")?;
+            if let Some(assignment) = assignment {
+                job.provider_node_id = Some(assignment.assigned_provider_node_id);
+                if matches!(
+                    job.state,
+                    DesktopJobState::Queued | DesktopJobState::Matching
+                ) {
+                    job.state = DesktopJobState::Running;
+                    job.progress_percent = job.progress_percent.max(50);
+                }
+            } else if job.state == DesktopJobState::Queued {
+                job.state = DesktopJobState::Matching;
+                job.progress_percent = job.progress_percent.max(35);
+            }
+
+            if let Some(availability) = protocol_store
+                .load_receipt_availability_by_job(&job.job_id)
+                .await
+                .context("load protocol receipt availability")?
+                .into_iter()
+                .next()
+            {
+                job.provider_node_id = Some(availability.provider_node_id);
+                job.evidence.execution_receipt_sha256 = Some(availability.execution_receipt_sha256);
+                job.evidence.bundle_sha256 = Some(availability.bundle_sha256);
+                job.state = DesktopJobState::Verifying;
+                job.progress_percent = job.progress_percent.max(75);
+            }
+
+            if let Some(bundle) = protocol_store
+                .load_receipt_bundle(&job.job_id)
+                .await
+                .context("load protocol receipt bundle")?
+            {
+                job.evidence.bundle_sha256 = Some(bundle.bundle_sha256);
+                job.evidence.execution_receipt_sha256 = Some(bundle.execution_receipt_sha256);
+                job.state = DesktopJobState::Verifying;
+                job.progress_percent = job.progress_percent.max(80);
+            }
+
+            let receipts = protocol_store
+                .load_verification_receipts_by_job(&job.job_id)
+                .await
+                .context("load protocol verification receipts")?;
+            let quorum = calculate_quorum_status(job_id, job.required_verifier_count, &receipts);
+            job.evidence.verifier_count = quorum.accepted_verifier_count as u8;
+            job.evidence.verification_status = Some(format!("{:?}", quorum.status).to_lowercase());
+            if quorum.accepted_verifier_count >= usize::from(job.required_verifier_count) {
+                job.state = DesktopJobState::Completed;
+                job.progress_percent = 100;
+            }
+            job.updated_at = Utc::now().to_rfc3339();
+        }
+        update_wallet_commitment(&mut state);
+        persist_state(&self.inner.state_dir, &state)?;
+        Ok(WorkspaceSnapshot {
+            jobs: state.jobs.clone(),
+            wallet: state
+                .wallet_status
+                .clone()
+                .unwrap_or_else(|| wallet_status(None, &state.jobs)),
+            protocol_announcement_count: state
+                .jobs
+                .iter()
+                .filter(|job| job.state != DesktopJobState::Draft)
+                .count() as u32,
+        })
     }
 
     async fn configure_wallet(&self, input: WalletConfigInput) -> Result<WalletStatus> {
@@ -1008,6 +1101,13 @@ impl DaemonClient {
     pub async fn publish_job(&self, job_id: String) -> Result<DesktopJob> {
         match self.send(DaemonCommand::PublishJob { job_id }).await? {
             DaemonResult::Job(job) => Ok(job),
+            result => bail!("unexpected daemon result: {result:?}"),
+        }
+    }
+
+    pub async fn refresh_protocol_jobs(&self) -> Result<WorkspaceSnapshot> {
+        match self.send(DaemonCommand::RefreshProtocolJobs).await? {
+            DaemonResult::Workspace(workspace) => Ok(workspace),
             result => bail!("unexpected daemon result: {result:?}"),
         }
     }
@@ -1514,6 +1614,38 @@ mod tests {
 
         let workspace = service.workspace().await;
         assert_eq!(workspace.protocol_announcement_count, 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_protocol_jobs_reflects_assignment() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DaemonService::new(directory.path().to_path_buf()).unwrap();
+        let job = service.create_job(valid_job_input()).await.unwrap();
+        service.submit_job(&job.job_id).await.unwrap();
+        service.publish_job(&job.job_id).await.unwrap();
+
+        let store = ProtocolStore::open(&directory.path().join("protocol"))
+            .await
+            .unwrap();
+        let mut assignment = osciris_core::JobAssignment {
+            job_id: uuid::Uuid::parse_str(&job.job_id).unwrap(),
+            assigned_provider_node_id: "provider-a".to_string(),
+            assigner_node_id: "enterprise-1".to_string(),
+            assigner_ed25519_public_key_base64: "test-key".to_string(),
+            assignment_reason: "test".to_string(),
+            assigned_at: Utc::now().to_rfc3339(),
+            signature: "test-signature".to_string(),
+        };
+        store.record_job_assignment(&assignment).await.unwrap();
+        assignment.signature = "different-signature".to_string();
+
+        let refreshed = service.refresh_protocol_jobs().await.unwrap();
+        assert_eq!(refreshed.jobs[0].state, DesktopJobState::Running);
+        assert_eq!(
+            refreshed.jobs[0].provider_node_id,
+            Some("provider-a".to_string())
+        );
+        assert!(refreshed.jobs[0].progress_percent >= 50);
     }
 
     #[test]
