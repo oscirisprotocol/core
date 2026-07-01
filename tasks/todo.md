@@ -1,5 +1,63 @@
 # Task Plan
 
+## Desktop Remote Prompt Test Inference
+
+### Objective
+
+Make it possible for a developer to send a prompt from the desktop app to a
+remote provider machine and receive a signed inference response back through
+OSCIRIS peer transport.
+
+### Current Boundary
+
+- Desktop now supports asynchronous protocol jobs: publish, match, import
+  provider evidence, import verifier receipts, and complete on quorum.
+- Backend CLI supports multi-host off-chain participation with `network serve`,
+  `network run-provider`, `network run-verifier`, provider claims,
+  assignments, execution receipts, receipt fetching, and quorum.
+- Interactive prompt/result transport is not implemented yet. The milestone
+  doc explicitly says `osciris-node inference submit/wait/serve` are target
+  commands, not available in v0.1.1.
+- Therefore: a prompt can be tested on another machine today only as an
+  asynchronous inference-economics job through the CLI/provider flow, not as a
+  one-click desktop prompt request with direct response transport.
+
+### Spec
+
+- Add daemon/Desktop network join configuration:
+  - local enterprise/bootstrap identity
+  - listen address
+  - bootstrap peers
+  - provider/verifier discovery status
+- Add daemon command to start/stop `network serve` equivalent from desktop.
+- Add daemon command to submit an interactive inference request once backend
+  `inference submit/wait/serve` transport exists.
+- Add provider profile/capability matching for the pinned inference profile,
+  not just generic `gpu>=Ngb`.
+- Add response transport and local display:
+  - prompt commitment
+  - selected provider
+  - response text
+  - result commitment
+  - receipt/quorum status
+- Keep prompt/result private to peer transport; public state exposes only
+  hashes, receipts, and sanitized metadata.
+
+### Checklist
+
+- [x] Confirm current backend/desktop boundary
+- [ ] Implement interactive inference peer transport commands
+- [ ] Expose network join/serve status through daemon/Desktop
+- [ ] Add desktop prompt submission and response UI
+- [ ] Verify multi-host prompt round trip with at least one remote provider
+      and verifier quorum
+
+### Review
+
+- Pending implementation. Current usable path is the CLI multi-host
+  asynchronous inference-economics flow documented in
+  `docs/multi_host_testnet_join_guide.md`.
+
 ## Desktop Execution and Verification Completion
 
 ### Objective

@@ -27,9 +27,54 @@ Desktop records use these states:
 | Completed | Required verification and settlement conditions are satisfied |
 | Failed | Execution or policy requirements were not satisfied |
 
-Only `Draft` and `Awaiting funding` are currently writable from Desktop. Later
-states must be supplied by protocol and chain integrations; the UI does not
-synthesize them.
+Desktop now writes the local buyer-side protocol controls for this lifecycle:
+
+- `Draft` → `Awaiting funding` through local job approval;
+- `Awaiting funding` → `Queued` by publishing a signed protocol announcement;
+- `Queued`/`Matching` → `Running` by triggering daemon-side provider matching
+  against signed claims/capabilities already present in the daemon protocol
+  store;
+- `Running`/`Verifying` updates by importing signed provider evidence and
+  signed verifier receipt announcements;
+- `Completed` only after verifier quorum is met.
+
+Desktop still does not run external provider or verifier machines. Provider
+execution and verifier review are backend/node responsibilities; Desktop
+observes and imports their signed protocol outputs.
+
+## Remote Prompt Boundary
+
+Question: can a developer send a prompt from Desktop to another machine for
+test inference?
+
+Current answer: not yet as an interactive one-click Desktop prompt round trip.
+
+What works today:
+
+- A multi-host asynchronous inference-economics workflow can run through the
+  CLI using `network serve`, `network run-provider`, `network run-verifier`,
+  job announcement, provider claim/assignment, execution receipt, verifier
+  receipt, and quorum status.
+- Desktop can participate on the buyer side after signed protocol records are
+  present: publish a job, match against stored provider claims/capabilities,
+  import provider evidence, import verifier receipts, and show completion.
+
+What is not yet implemented:
+
+- Desktop does not start/join the P2P network from the UI.
+- Desktop does not yet expose an interactive prompt submission surface.
+- The backend target commands documented in
+  `docs/milestones/provider_local_inference_roundtrip.md` —
+  `osciris-node inference serve`, `osciris-node inference submit`, and
+  `osciris-node inference wait` — are milestone targets, not available in
+  v0.1.1.
+- The current backend proves asynchronous accountable jobs. It does not yet
+  provide direct prompt/result peer transport back to the desktop.
+
+Use `docs/multi_host_testnet_join_guide.md` today for testing inference on
+another machine via the asynchronous provider/verifier flow. Build the
+interactive prompt round trip next by implementing the inference peer transport
+milestone and then exposing it through the daemon/Desktop UI.
 
 ## Wallet Boundary
 
