@@ -8,8 +8,9 @@ use std::{
 use osciris_daemon::{
     default_state_dir, CreateJobInput, DaemonClient, DaemonStatus, DesktopJob,
     EvidenceIngestionInput, InferencePromptInput, InferencePromptResult,
-    UnsignedTokenTransfer, VerificationReceiptImportInput, WalletConfigInput, WalletStatus,
-    WithdrawalInput, WorkspaceSnapshot,
+    NetworkControlInput, NetworkControlResult, UnsignedTokenTransfer,
+    VerificationReceiptImportInput, WalletConfigInput, WalletStatus, WithdrawalInput,
+    WorkspaceSnapshot,
 };
 
 #[tauri::command]
@@ -24,6 +25,22 @@ async fn daemon_status() -> Result<DaemonStatus, String> {
 async fn set_participation(enabled: bool) -> Result<DaemonStatus, String> {
     DaemonClient::default_for_user()
         .set_participation(enabled)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn start_network(input: NetworkControlInput) -> Result<NetworkControlResult, String> {
+    DaemonClient::default_for_user()
+        .start_network(input)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn stop_network() -> Result<NetworkControlResult, String> {
+    DaemonClient::default_for_user()
+        .stop_network()
         .await
         .map_err(|error| error.to_string())
 }
@@ -210,6 +227,8 @@ pub fn run() {
             refresh_protocol_jobs,
             refresh_wallet,
             set_participation,
+            start_network,
+            stop_network,
             submit_inference,
             submit_job,
             workspace_snapshot

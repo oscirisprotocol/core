@@ -25,7 +25,8 @@ use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::RwLock,
+    sync::{Mutex, RwLock},
+    task::JoinHandle,
 };
 use tokio_util::codec::{Framed, LinesCodec};
 
@@ -35,12 +36,13 @@ use osciris_core::{
     verify_job_claim_signature, verify_provider_capability_signature,
     verify_receipt_availability_signature, verify_verification_receipt_signature,
     verifying_key_from_base64, verifying_key_to_base64, ExecutionReceipt, JobAnnouncement,
-    JobAssignment, JobClaim, JobSpec, JobType, NodeStatus, PrivacyMode, PrivacyPolicy,
-    ProviderCapability, ReceiptAvailability, ReceiptBundle, VerificationReceiptAnnouncement,
+    JobAssignment, JobClaim, JobSpec, JobType, NodeIdentity, NodeRole, NodeStatus, PrivacyMode,
+    PrivacyPolicy, ProviderCapability, ReceiptAvailability, ReceiptBundle,
+    VerificationReceiptAnnouncement,
 };
 use osciris_node::network::{
-    create_inference_request, job_matches_provider_capability, wait_for_inference_response,
-    InferenceSubmitConfig, InferenceWaitConfig,
+    create_inference_request, job_matches_provider_capability, serve_presence,
+    wait_for_inference_response, InferenceSubmitConfig, InferenceWaitConfig, NetworkServeConfig,
 };
 use osciris_node::status::calculate_quorum_status;
 use osciris_node::store::ProtocolStore;
@@ -178,6 +180,10 @@ pub enum DaemonCommand {
     SetParticipation {
         enabled: bool,
     },
+    StartNetwork {
+        input: NetworkControlInput,
+    },
+    StopNetwork,
     CreateJob {
         input: CreateJobInput,
     },
@@ -246,6 +252,7 @@ pub enum DaemonResult {
     Pong { daemon_version: String },
     Status(DaemonStatus),
     Workspace(WorkspaceSnapshot),
+    Network(NetworkControlResult),
     Job(DesktopJob),
     Wallet(WalletStatus),
     Withdrawal(UnsignedTokenTransfer),
@@ -265,6 +272,9 @@ pub struct DaemonStatus {
     pub uptime_seconds: u64,
     pub participation_enabled: bool,
     pub network_state: NetworkState,
+    pub network_listen_addr: Option<String>,
+    pub network_bootstrap_peers: Vec<String>,
+    pub network_error: Option<String>,
     pub active_jobs: u32,
     pub platform: PlatformSummary,
     pub readiness: Option<ReadinessSummary>,
@@ -439,6 +449,19 @@ pub struct VerificationReceiptImportInput {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkControlInput {
+    pub listen_addr: String,
+    pub bootstrap_peers: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkControlResult {
+    pub status: DaemonStatus,
+    pub peer_id: Option<String>,
+    pub listen_addr: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InferencePromptInput {
     pub requester_id: String,
     pub profile_id: String,
@@ -488,8 +511,17 @@ struct DaemonServiceInner {
     state_dir: PathBuf,
     auth_token: String,
     state: RwLock<PersistedState>,
+    network: Mutex<NetworkTaskState>,
     http: reqwest::Client,
     protocol_identity: ed25519_dalek::SigningKey,
+}
+
+#[derive(Default)]
+struct NetworkTaskState {
+    handle: Option<JoinHandle<()>>,
+    listen_addr: Option<String>,
+    bootstrap_peers: Vec<String>,
+    last_error: Option<String>,
 }
 
 impl DaemonService {
@@ -509,6 +541,7 @@ impl DaemonService {
                 state_dir,
                 auth_token,
                 state: RwLock::new(state),
+                network: Mutex::new(NetworkTaskState::default()),
                 http,
                 protocol_identity,
             }),
@@ -571,6 +604,26 @@ impl DaemonService {
                     DaemonResult::Status(self.status().await),
                 )
             }
+            DaemonCommand::StartNetwork { input } => match self.start_network(input).await {
+                Ok(result) => {
+                    DaemonResponse::success(request.request_id, DaemonResult::Network(result))
+                }
+                Err(error) => DaemonResponse::error(
+                    request.request_id,
+                    "network_start_failed",
+                    error.to_string(),
+                ),
+            },
+            DaemonCommand::StopNetwork => match self.stop_network().await {
+                Ok(result) => {
+                    DaemonResponse::success(request.request_id, DaemonResult::Network(result))
+                }
+                Err(error) => DaemonResponse::error(
+                    request.request_id,
+                    "network_stop_failed",
+                    error.to_string(),
+                ),
+            },
             DaemonCommand::CreateJob { input } => match self.create_job(input).await {
                 Ok(job) => DaemonResponse::success(request.request_id, DaemonResult::Job(job)),
                 Err(error) => {
@@ -684,12 +737,27 @@ impl DaemonService {
 
     pub async fn status(&self) -> DaemonStatus {
         let state = self.inner.state.read().await;
+        let network = self.inner.network.lock().await;
+        let network_running = network
+            .handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished());
+        let network_state = if network_running {
+            NetworkState::Online
+        } else if network.last_error.is_some() {
+            NetworkState::Degraded
+        } else {
+            NetworkState::NotConfigured
+        };
         DaemonStatus {
             api_version: API_VERSION,
             daemon_version: env!("CARGO_PKG_VERSION").to_string(),
             uptime_seconds: self.inner.started_at.elapsed().as_secs(),
             participation_enabled: state.participation_enabled,
-            network_state: NetworkState::NotConfigured,
+            network_state,
+            network_listen_addr: network.listen_addr.clone(),
+            network_bootstrap_peers: network.bootstrap_peers.clone(),
+            network_error: network.last_error.clone(),
             active_jobs: state
                 .jobs
                 .iter()
@@ -1057,6 +1125,110 @@ impl DaemonService {
         self.refresh_protocol_jobs().await
     }
 
+    async fn start_network(&self, input: NetworkControlInput) -> Result<NetworkControlResult> {
+        let listen_addr = if input.listen_addr.trim().is_empty() {
+            "/ip4/127.0.0.1/tcp/0".to_string()
+        } else {
+            input.listen_addr.trim().to_string()
+        };
+        let bootstrap_peers = input
+            .bootstrap_peers
+            .into_iter()
+            .map(|peer| peer.trim().to_string())
+            .filter(|peer| !peer.is_empty())
+            .collect::<Vec<_>>();
+        let protocol_root = self.inner.state_dir.join("protocol");
+        let signing_key_seed_base64 = STANDARD.encode(self.inner.protocol_identity.to_bytes());
+        self.ensure_protocol_identity(&bootstrap_peers).await?;
+        let peer_id = osciris_node::network::peer_id_from_signing_seed(&signing_key_seed_base64)?;
+
+        let mut network = self.inner.network.lock().await;
+        if network
+            .handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+        {
+            let listen_addr = network.listen_addr.clone();
+            drop(network);
+            return Ok(NetworkControlResult {
+                status: self.status().await,
+                peer_id: Some(peer_id),
+                listen_addr,
+            });
+        }
+
+        let config = NetworkServeConfig {
+            protocol_root,
+            signing_key_seed_base64,
+            listen_addr: listen_addr.clone(),
+            bootstrap_peers: bootstrap_peers.clone(),
+            status: NodeStatus::OnlineIdle,
+            current_load: 0.0,
+            active_job_count: 0,
+            presence_interval: Duration::from_secs(5),
+            run_for: None,
+        };
+        let inner = self.inner.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(error) = serve_presence(&config).await {
+                let mut network = inner.network.lock().await;
+                network.last_error = Some(error.to_string());
+                tracing::warn!("desktop network serve stopped: {error}");
+            }
+        });
+
+        network.handle = Some(handle);
+        network.listen_addr = Some(listen_addr.clone());
+        network.bootstrap_peers = bootstrap_peers;
+        network.last_error = None;
+        drop(network);
+
+        Ok(NetworkControlResult {
+            status: self.status().await,
+            peer_id: Some(peer_id),
+            listen_addr: Some(listen_addr),
+        })
+    }
+
+    async fn stop_network(&self) -> Result<NetworkControlResult> {
+        let mut network = self.inner.network.lock().await;
+        if let Some(handle) = network.handle.take() {
+            handle.abort();
+        }
+        network.last_error = None;
+        drop(network);
+        Ok(NetworkControlResult {
+            status: self.status().await,
+            peer_id: None,
+            listen_addr: None,
+        })
+    }
+
+    async fn ensure_protocol_identity(&self, bootstrap_peers: &[String]) -> Result<NodeIdentity> {
+        let protocol_store = ProtocolStore::open(&self.inner.state_dir.join("protocol"))
+            .await
+            .context("open daemon protocol store")?;
+        if let Some(identity) = protocol_store.load_node_identity().await? {
+            return Ok(identity);
+        }
+        let identity = NodeIdentity {
+            node_id: "desktop-workspace".to_string(),
+            role: NodeRole::Enterprise,
+            ed25519_public_key_base64: verifying_key_to_base64(
+                &self.inner.protocol_identity.verifying_key(),
+            ),
+            evm_address: None,
+            display_name: "OSCIRIS Desktop Workspace".to_string(),
+            bootstrap_peers: bootstrap_peers.to_vec(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        protocol_store
+            .record_node_identity(&identity)
+            .await
+            .context("record daemon protocol identity")?;
+        Ok(identity)
+    }
+
     async fn submit_inference(&self, input: InferencePromptInput) -> Result<InferencePromptResult> {
         if input.prompt.trim().is_empty() {
             bail!("prompt must not be empty");
@@ -1393,6 +1565,20 @@ impl DaemonClient {
             .await?
         {
             DaemonResult::Status(status) => Ok(status),
+            result => bail!("unexpected daemon result: {result:?}"),
+        }
+    }
+
+    pub async fn start_network(&self, input: NetworkControlInput) -> Result<NetworkControlResult> {
+        match self.send(DaemonCommand::StartNetwork { input }).await? {
+            DaemonResult::Network(result) => Ok(result),
+            result => bail!("unexpected daemon result: {result:?}"),
+        }
+    }
+
+    pub async fn stop_network(&self) -> Result<NetworkControlResult> {
+        match self.send(DaemonCommand::StopNetwork).await? {
+            DaemonResult::Network(result) => Ok(result),
             result => bail!("unexpected daemon result: {result:?}"),
         }
     }
@@ -2229,6 +2415,36 @@ mod tests {
 
         let restarted = DaemonService::new(directory.path().to_path_buf()).unwrap();
         assert!(restarted.status().await.participation_enabled);
+    }
+
+    #[tokio::test]
+    async fn network_start_records_identity_and_stop_resets_status() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DaemonService::new(directory.path().to_path_buf()).unwrap();
+
+        let started = service
+            .start_network(NetworkControlInput {
+                listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
+                bootstrap_peers: vec![],
+            })
+            .await
+            .unwrap();
+        assert_eq!(started.status.network_state, NetworkState::Online);
+        assert!(started.peer_id.is_some());
+
+        let store = ProtocolStore::open(&directory.path().join("protocol"))
+            .await
+            .unwrap();
+        let identity = store.load_node_identity().await.unwrap().unwrap();
+        assert_eq!(identity.node_id, "desktop-workspace");
+        assert_eq!(identity.role, NodeRole::Enterprise);
+        assert_eq!(
+            identity.ed25519_public_key_base64,
+            verifying_key_to_base64(&service.inner.protocol_identity.verifying_key())
+        );
+
+        let stopped = service.stop_network().await.unwrap();
+        assert_eq!(stopped.status.network_state, NetworkState::NotConfigured);
     }
 
     #[tokio::test]

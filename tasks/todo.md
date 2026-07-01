@@ -121,7 +121,7 @@ OSCIRIS peer transport.
 
 - [x] Confirm current backend/desktop boundary
 - [x] Implement interactive inference peer transport commands
-- [ ] Expose network join/serve status through daemon/Desktop
+- [x] Expose network join/serve status through daemon/Desktop
 - [x] Add desktop prompt submission and response UI
 - [ ] Verify multi-host prompt round trip with at least one remote provider
       and verifier quorum
@@ -138,13 +138,22 @@ OSCIRIS peer transport.
 - The response panel displays provider output plus request ID, provider ID,
   profile, request hash, response hash, token counts, and latency.
 - Added daemon validation coverage for invalid desktop inference inputs.
-- Still pending: desktop network join/serve controls and a verified real
-  multi-host prompt round trip with a remote provider/verifier quorum.
+- Added daemon-managed desktop network start/stop controls around the existing
+  `serve_presence` peer network primitive.
+- Node view now accepts listen/bootstrap multiaddrs, starts/stops protocol
+  presence serving, and reports online/degraded/not-configured state.
+- Network start creates the daemon protocol identity in the protocol store when
+  missing, using the daemon protocol signing key.
+- Still pending: a verified real multi-host prompt round trip with a remote
+  provider/verifier quorum.
 - Verification passed:
   - `cargo fmt --check`
+  - `cargo test -p osciris-daemon network_start_records_identity_and_stop_resets_status --locked -- --nocapture`
   - `cargo test -p osciris-daemon submit_inference_rejects_invalid_desktop_inputs --locked -- --nocapture`
   - `cargo test --locked -p osciris-daemon`
+  - `cargo clippy -p osciris-daemon --locked --all-targets -- -D warnings`
   - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop prepare:sidecar:debug`
   - `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
 
 ## Desktop Execution and Verification Completion

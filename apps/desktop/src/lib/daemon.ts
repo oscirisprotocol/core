@@ -44,6 +44,9 @@ export interface DaemonStatus {
   uptime_seconds: number;
   participation_enabled: boolean;
   network_state: NetworkState;
+  network_listen_addr: string | null;
+  network_bootstrap_peers: string[];
+  network_error: string | null;
   active_jobs: number;
   platform: PlatformSummary;
   readiness: ReadinessSummary | null;
@@ -69,6 +72,17 @@ export interface EvidenceIngestionInput {
 export interface VerificationReceiptImportInput {
   job_id: string;
   receipt_json_path: string;
+}
+
+export interface NetworkControlInput {
+  listen_addr: string;
+  bootstrap_peers: string[];
+}
+
+export interface NetworkControlResult {
+  status: DaemonStatus;
+  peer_id: string | null;
+  listen_addr: string | null;
 }
 
 export interface InferencePromptInput {
@@ -172,6 +186,16 @@ export function launchDaemon(): Promise<DaemonStatus> {
 
 export function setParticipation(enabled: boolean): Promise<DaemonStatus> {
   return invoke<DaemonStatus>("set_participation", { enabled });
+}
+
+export function startNetwork(
+  input: NetworkControlInput,
+): Promise<NetworkControlResult> {
+  return invoke<NetworkControlResult>("start_network", { input });
+}
+
+export function stopNetwork(): Promise<NetworkControlResult> {
+  return invoke<NetworkControlResult>("stop_network");
 }
 
 export function getWorkspace(): Promise<WorkspaceSnapshot> {

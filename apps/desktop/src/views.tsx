@@ -7,6 +7,7 @@ import type {
   InferencePromptResult,
   JobKind,
   JobState,
+  NetworkControlInput,
   PrivacyMode,
   UnsignedTokenTransfer,
   WalletConfigInput,
@@ -1538,14 +1539,34 @@ export function NodeView({
   busy,
   onLaunch,
   onParticipation,
+  onStartNetwork,
+  onStopNetwork,
 }: {
   status: DaemonStatus | null;
   daemonLive: boolean;
   busy: boolean;
   onLaunch: () => void;
   onParticipation: (enabled: boolean) => void;
+  onStartNetwork: (input: NetworkControlInput) => void;
+  onStopNetwork: () => void;
 }) {
   const participating = status?.participation_enabled ?? false;
+  const networkOnline = status?.network_state === "online";
+  const [listenAddr, setListenAddr] = useState(
+    status?.network_listen_addr ?? "/ip4/127.0.0.1/tcp/0",
+  );
+  const [bootstrapText, setBootstrapText] = useState(
+    status?.network_bootstrap_peers.join("\n") ?? "",
+  );
+
+  function startNetwork(event: React.FormEvent) {
+    event.preventDefault();
+    onStartNetwork({
+      listen_addr: listenAddr.trim() || "/ip4/127.0.0.1/tcp/0",
+      bootstrap_peers: parseBootstrapPeers(bootstrapText),
+    });
+  }
+
   return (
     <section className="workspace-section">
       <div className="node-hero">
@@ -1617,12 +1638,69 @@ export function NodeView({
         </article>
       </section>
       <div className="boundary-callout">
-        <strong>Next operator integration</strong>
+        <strong>Network serve boundary</strong>
         <span>
-          Signed identity, accelerator discovery, model profiles, peer bootstrap,
-          and provider job execution will attach to this daemon surface.
+          Starting the network publishes this desktop node presence and replays
+          local signed protocol state. Provider execution and model serving
+          still run through the provider-specific commands.
         </span>
       </div>
+      <form className="panel network-control-panel" onSubmit={startNetwork}>
+        <div className="panel-heading">
+          <div>
+            <span className="eyebrow">PEER NETWORK</span>
+            <h3>Join and serve protocol presence</h3>
+          </div>
+          <span className="pending-badge">
+            {status ? titleCase(status.network_state) : "Offline"}
+          </span>
+        </div>
+        <div className="form-grid">
+          <label className="wide">
+            Listen multiaddr
+            <input
+              onChange={(event) => setListenAddr(event.target.value)}
+              placeholder="/ip4/127.0.0.1/tcp/0"
+              value={listenAddr}
+            />
+          </label>
+          <label className="wide">
+            Bootstrap peers
+            <textarea
+              onChange={(event) => setBootstrapText(event.target.value)}
+              placeholder="/ip4/192.168.1.10/tcp/4100/p2p/12D3KooW..."
+              rows={3}
+              value={bootstrapText}
+            />
+          </label>
+        </div>
+        {status?.network_error ? (
+          <div className="boundary-callout warning">
+            <strong>Network task stopped</strong>
+            <span>{status.network_error}</span>
+          </div>
+        ) : null}
+        <div className="composer-actions">
+          {networkOnline ? (
+            <button
+              className="secondary-button"
+              disabled={busy}
+              onClick={onStopNetwork}
+              type="button"
+            >
+              Stop network
+            </button>
+          ) : (
+            <button
+              className="primary-button"
+              disabled={!daemonLive || busy}
+              type="submit"
+            >
+              Start network
+            </button>
+          )}
+        </div>
+      </form>
     </section>
   );
 }

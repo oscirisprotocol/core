@@ -16,10 +16,14 @@ import {
   refreshProtocolJobs,
   refreshWallet,
   setParticipation,
+  startNetwork,
+  stopNetwork,
   submitInference,
   submitJob,
   type InferencePromptInput,
   type InferencePromptResult,
+  type NetworkControlInput,
+  type NetworkControlResult,
   type UnsignedTokenTransfer,
   type WalletConfigInput,
   type WithdrawalInput,
@@ -187,6 +191,21 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function handleNetworkStart(input: NetworkControlInput) {
+    await runAction(
+      () => startNetwork(input),
+      (result: NetworkControlResult) => {
+        setStatus(result.status);
+      },
+    );
+  }
+
+  async function handleNetworkStop() {
+    await runAction(stopNetwork, (result: NetworkControlResult) => {
+      setStatus(result.status);
+    });
   }
 
   const daemonLive = connection === "connected" && status !== null;
@@ -413,6 +432,8 @@ export default function App() {
               onParticipation={(enabled) =>
                 void runAction(() => setParticipation(enabled))
               }
+              onStartNetwork={(input) => void handleNetworkStart(input)}
+              onStopNetwork={() => void handleNetworkStop()}
             />
           )}
         </div>
