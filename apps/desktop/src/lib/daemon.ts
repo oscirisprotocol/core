@@ -71,6 +71,28 @@ export interface VerificationReceiptImportInput {
   receipt_json_path: string;
 }
 
+export interface InferencePromptInput {
+  requester_id: string;
+  profile_id: string;
+  prompt: string;
+  max_output_tokens: number;
+  provider_peer_id: string;
+  bootstrap_peers: string[];
+  timeout_seconds: number;
+}
+
+export interface InferencePromptResult {
+  request_id: string;
+  profile_id: string;
+  provider_node_id: string;
+  response_text: string;
+  request_sha256: string;
+  response_sha256: string;
+  prompt_tokens: number;
+  output_tokens: number;
+  latency_ms: number;
+}
+
 export interface JobEvidenceSummary {
   execution_receipt_sha256: string | null;
   verification_status: string | null;
@@ -186,6 +208,12 @@ export function importVerificationReceipt(
   input: VerificationReceiptImportInput,
 ): Promise<WorkspaceSnapshot> {
   return invoke<WorkspaceSnapshot>("import_verification_receipt", { input });
+}
+
+export function submitInference(
+  input: InferencePromptInput,
+): Promise<InferencePromptResult> {
+  return invoke<InferencePromptResult>("submit_inference", { input });
 }
 
 export function configureWallet(

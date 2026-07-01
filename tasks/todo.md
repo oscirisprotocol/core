@@ -120,17 +120,32 @@ OSCIRIS peer transport.
 ### Checklist
 
 - [x] Confirm current backend/desktop boundary
-- [ ] Implement interactive inference peer transport commands
+- [x] Implement interactive inference peer transport commands
 - [ ] Expose network join/serve status through daemon/Desktop
-- [ ] Add desktop prompt submission and response UI
+- [x] Add desktop prompt submission and response UI
 - [ ] Verify multi-host prompt round trip with at least one remote provider
       and verifier quorum
 
 ### Review
 
-- Pending implementation. Current usable path is the CLI multi-host
-  asynchronous inference-economics flow documented in
-  `docs/multi_host_testnet_join_guide.md`.
+- In progress: backend interactive peer transport now exists through signed
+  inference request/response types, libp2p request-response, and CLI
+  `inference serve/submit/wait`.
+- Added daemon/Tauri/TypeScript bridge so the desktop can submit a private
+  prompt to a provider peer and display the signed response.
+- Added desktop `Test inference` view with requester/profile/provider peer,
+  bootstrap multiaddr, token/timeout, and prompt inputs.
+- The response panel displays provider output plus request ID, provider ID,
+  profile, request hash, response hash, token counts, and latency.
+- Added daemon validation coverage for invalid desktop inference inputs.
+- Still pending: desktop network join/serve controls and a verified real
+  multi-host prompt round trip with a remote provider/verifier quorum.
+- Verification passed:
+  - `cargo fmt --check`
+  - `cargo test -p osciris-daemon submit_inference_rejects_invalid_desktop_inputs --locked -- --nocapture`
+  - `cargo test --locked -p osciris-daemon`
+  - `pnpm --dir apps/desktop build`
+  - `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
 
 ## Desktop Execution and Verification Completion
 

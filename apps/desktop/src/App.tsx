@@ -16,7 +16,10 @@ import {
   refreshProtocolJobs,
   refreshWallet,
   setParticipation,
+  submitInference,
   submitJob,
+  type InferencePromptInput,
+  type InferencePromptResult,
   type UnsignedTokenTransfer,
   type WalletConfigInput,
   type WithdrawalInput,
@@ -24,6 +27,7 @@ import {
 } from "./lib/daemon";
 import {
   EvidenceView,
+  InferenceView,
   JobDetailView,
   JobsView,
   NodeView,
@@ -31,12 +35,13 @@ import {
   WalletView,
 } from "./views";
 
-type View = "overview" | "jobs" | "evidence" | "wallet" | "node";
+type View = "overview" | "jobs" | "inference" | "evidence" | "wallet" | "node";
 type ConnectionState = "loading" | "connected" | "offline";
 
 const navigation: Array<{ id: View; label: string; group: string }> = [
   { id: "overview", label: "Overview", group: "Workspace" },
   { id: "jobs", label: "Compute jobs", group: "Workspace" },
+  { id: "inference", label: "Test inference", group: "Workspace" },
   { id: "evidence", label: "Evidence", group: "Workspace" },
   { id: "wallet", label: "Wallet", group: "Economics" },
   { id: "node", label: "Local node", group: "Operator" },
@@ -65,6 +70,7 @@ function viewTitle(view: View) {
   return {
     overview: "Overview",
     jobs: "Compute jobs",
+    inference: "Test inference",
     evidence: "Evidence",
     wallet: "Wallet",
     node: "Local node",
@@ -165,6 +171,22 @@ export default function App() {
       setStatus(next);
       setConnection("connected");
     });
+  }
+
+  async function handleInferenceSubmit(
+    input: InferencePromptInput,
+  ): Promise<InferencePromptResult> {
+    setBusy(true);
+    setError(null);
+    try {
+      return await submitInference(input);
+    } catch (submitError) {
+      const message = String(submitError);
+      setError(message);
+      throw submitError;
+    } finally {
+      setBusy(false);
+    }
   }
 
   const daemonLive = connection === "connected" && status !== null;
@@ -355,6 +377,12 @@ export default function App() {
                 void runAction(() => createJob(input))
               }
               onOpen={setSelectedJobId}
+            />
+          ) : view === "inference" ? (
+            <InferenceView
+              daemonLive={daemonLive}
+              busy={busy}
+              onSubmit={handleInferenceSubmit}
             />
           ) : view === "evidence" ? (
             <EvidenceView

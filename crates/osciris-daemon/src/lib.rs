@@ -38,7 +38,10 @@ use osciris_core::{
     JobAssignment, JobClaim, JobSpec, JobType, NodeStatus, PrivacyMode, PrivacyPolicy,
     ProviderCapability, ReceiptAvailability, ReceiptBundle, VerificationReceiptAnnouncement,
 };
-use osciris_node::network::job_matches_provider_capability;
+use osciris_node::network::{
+    create_inference_request, job_matches_provider_capability, wait_for_inference_response,
+    InferenceSubmitConfig, InferenceWaitConfig,
+};
 use osciris_node::status::calculate_quorum_status;
 use osciris_node::store::ProtocolStore;
 
@@ -194,6 +197,9 @@ pub enum DaemonCommand {
     ImportVerificationReceipt {
         input: VerificationReceiptImportInput,
     },
+    SubmitInference {
+        input: InferencePromptInput,
+    },
     ConfigureWallet {
         input: WalletConfigInput,
     },
@@ -243,6 +249,7 @@ pub enum DaemonResult {
     Job(DesktopJob),
     Wallet(WalletStatus),
     Withdrawal(UnsignedTokenTransfer),
+    Inference(InferencePromptResult),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -432,6 +439,30 @@ pub struct VerificationReceiptImportInput {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InferencePromptInput {
+    pub requester_id: String,
+    pub profile_id: String,
+    pub prompt: String,
+    pub max_output_tokens: u32,
+    pub provider_peer_id: String,
+    pub bootstrap_peers: Vec<String>,
+    pub timeout_seconds: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InferencePromptResult {
+    pub request_id: String,
+    pub profile_id: String,
+    pub provider_node_id: String,
+    pub response_text: String,
+    pub request_sha256: String,
+    pub response_sha256: String,
+    pub prompt_tokens: u32,
+    pub output_tokens: u32,
+    pub latency_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceSnapshot {
     pub jobs: Vec<DesktopJob>,
     pub wallet: WalletStatus,
@@ -605,6 +636,16 @@ impl DaemonService {
                     ),
                 }
             }
+            DaemonCommand::SubmitInference { input } => match self.submit_inference(input).await {
+                Ok(result) => {
+                    DaemonResponse::success(request.request_id, DaemonResult::Inference(result))
+                }
+                Err(error) => DaemonResponse::error(
+                    request.request_id,
+                    "inference_submit_failed",
+                    error.to_string(),
+                ),
+            },
             DaemonCommand::ConfigureWallet { input } => match self.configure_wallet(input).await {
                 Ok(wallet) => {
                     DaemonResponse::success(request.request_id, DaemonResult::Wallet(wallet))
@@ -1016,6 +1057,54 @@ impl DaemonService {
         self.refresh_protocol_jobs().await
     }
 
+    async fn submit_inference(&self, input: InferencePromptInput) -> Result<InferencePromptResult> {
+        if input.prompt.trim().is_empty() {
+            bail!("prompt must not be empty");
+        }
+        if input.prompt.len() > 16_384 {
+            bail!("prompt exceeds the desktop safety limit");
+        }
+        if input.profile_id.trim().is_empty() {
+            bail!("profile_id must not be empty");
+        }
+        if input.provider_peer_id.trim().is_empty() {
+            bail!("provider_peer_id must not be empty");
+        }
+        let max_output_tokens = input.max_output_tokens.clamp(1, 4096);
+        let signing_key_seed_base64 = STANDARD.encode(self.inner.protocol_identity.to_bytes());
+        let request = create_inference_request(&InferenceSubmitConfig {
+            signing_key_seed_base64: signing_key_seed_base64.clone(),
+            requester_id: if input.requester_id.trim().is_empty() {
+                "desktop-workspace".to_string()
+            } else {
+                input.requester_id.trim().to_string()
+            },
+            profile_id: input.profile_id,
+            prompt: input.prompt,
+            max_output_tokens,
+        })?;
+        let summary = wait_for_inference_response(&InferenceWaitConfig {
+            signing_key_seed_base64,
+            request,
+            provider_peer_id: input.provider_peer_id,
+            listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
+            bootstrap_peers: input.bootstrap_peers,
+            timeout: Duration::from_secs(input.timeout_seconds.clamp(1, 600)),
+        })
+        .await?;
+        Ok(InferencePromptResult {
+            request_id: summary.request.request_id.to_string(),
+            profile_id: summary.response.profile_id,
+            provider_node_id: summary.response.provider_node_id,
+            response_text: summary.response.response_text,
+            request_sha256: summary.response.request_sha256,
+            response_sha256: summary.response.response_sha256,
+            prompt_tokens: summary.response.prompt_tokens,
+            output_tokens: summary.response.output_tokens,
+            latency_ms: summary.response.latency_ms,
+        })
+    }
+
     async fn configure_wallet(&self, input: WalletConfigInput) -> Result<WalletStatus> {
         let address = normalize_nonzero_address(&input.address)?;
         let settlement_token_address = input
@@ -1369,6 +1458,16 @@ impl DaemonClient {
             .await?
         {
             DaemonResult::Workspace(workspace) => Ok(workspace),
+            result => bail!("unexpected daemon result: {result:?}"),
+        }
+    }
+
+    pub async fn submit_inference(
+        &self,
+        input: InferencePromptInput,
+    ) -> Result<InferencePromptResult> {
+        match self.send(DaemonCommand::SubmitInference { input }).await? {
+            DaemonResult::Inference(result) => Ok(result),
             result => bail!("unexpected daemon result: {result:?}"),
         }
     }
@@ -2173,6 +2272,48 @@ mod tests {
 
         let workspace = service.workspace().await;
         assert_eq!(workspace.protocol_announcement_count, 1);
+    }
+
+    #[tokio::test]
+    async fn submit_inference_rejects_invalid_desktop_inputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DaemonService::new(directory.path().to_path_buf()).unwrap();
+        let valid = InferencePromptInput {
+            requester_id: "desktop-test".to_string(),
+            profile_id: "qwen3-4b-local".to_string(),
+            prompt: "Say hello".to_string(),
+            max_output_tokens: 128,
+            provider_peer_id: "12D3KooWProvider".to_string(),
+            bootstrap_peers: vec![],
+            timeout_seconds: 5,
+        };
+
+        let mut missing_prompt = valid.clone();
+        missing_prompt.prompt = "   ".to_string();
+        assert!(service
+            .submit_inference(missing_prompt)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("prompt must not be empty"));
+
+        let mut missing_profile = valid.clone();
+        missing_profile.profile_id = " ".to_string();
+        assert!(service
+            .submit_inference(missing_profile)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("profile_id must not be empty"));
+
+        let mut missing_provider = valid;
+        missing_provider.provider_peer_id = " ".to_string();
+        assert!(service
+            .submit_inference(missing_provider)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("provider_peer_id must not be empty"));
     }
 
     #[tokio::test]

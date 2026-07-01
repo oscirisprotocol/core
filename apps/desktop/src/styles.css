@@ -187,6 +187,10 @@ button {
   border-radius: 50%;
 }
 
+.glyph-inference {
+  border-radius: 50%;
+}
+
 .glyph-node {
   transform: rotate(45deg);
 }
@@ -1361,6 +1365,63 @@ select:focus {
   font-size: 10px;
 }
 
+.inference-live-card {
+  display: grid;
+  min-width: 210px;
+  gap: 5px;
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  padding: 15px 16px;
+  background: var(--surface);
+  color: var(--body);
+  font-size: 9px;
+}
+
+.inference-live-card.live {
+  border-color: #b9e8e5;
+  background: var(--surface-cyan);
+  color: var(--primary-ink);
+}
+
+.inference-live-card .status-dot {
+  margin-bottom: 4px;
+}
+
+.inference-live-card strong {
+  font-size: 11px;
+}
+
+.inference-live-card small {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.inference-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.inference-form .composer-actions {
+  justify-content: flex-end;
+  border-top: 1px solid var(--hairline);
+  padding: 17px 25px 20px;
+}
+
+.response-box {
+  min-height: 164px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  margin: 0 20px 8px;
+  padding: 15px;
+  background: #f8fbfa;
+  color: var(--ink);
+  font-size: 10px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
 .evidence-stat {
   display: grid;
   justify-items: end;
@@ -1755,7 +1816,8 @@ select:focus {
   }
 
   .detail-grid,
-  .wallet-grid {
+  .wallet-grid,
+  .inference-grid {
     grid-template-columns: 1fr;
   }
 

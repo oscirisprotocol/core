@@ -3,6 +3,8 @@ import type {
   CreateJobInput,
   DaemonStatus,
   DesktopJob,
+  InferencePromptInput,
+  InferencePromptResult,
   JobKind,
   JobState,
   PrivacyMode,
@@ -543,6 +545,278 @@ export function JobsView({
           </form>
         </div>
       ) : null}
+    </section>
+  );
+}
+
+const initialInferencePrompt: InferencePromptInput = {
+  requester_id: "desktop-workspace",
+  profile_id: "qwen3-4b-local",
+  prompt: "",
+  max_output_tokens: 512,
+  provider_peer_id: "",
+  bootstrap_peers: [],
+  timeout_seconds: 30,
+};
+
+function parseBootstrapPeers(value: string) {
+  return value
+    .split(/\r?\n|,/)
+    .map((peer) => peer.trim())
+    .filter(Boolean);
+}
+
+export function InferenceView({
+  daemonLive,
+  busy,
+  onSubmit,
+}: {
+  daemonLive: boolean;
+  busy: boolean;
+  onSubmit: (input: InferencePromptInput) => Promise<InferencePromptResult>;
+}) {
+  const [form, setForm] = useState<InferencePromptInput>(initialInferencePrompt);
+  const [bootstrapText, setBootstrapText] = useState("");
+  const [result, setResult] = useState<InferencePromptResult | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setLocalError(null);
+    setResult(null);
+
+    const input: InferencePromptInput = {
+      ...form,
+      requester_id: form.requester_id.trim() || "desktop-workspace",
+      profile_id: form.profile_id.trim(),
+      prompt: form.prompt.trim(),
+      provider_peer_id: form.provider_peer_id.trim(),
+      bootstrap_peers: parseBootstrapPeers(bootstrapText),
+      max_output_tokens: Math.max(1, Math.min(4096, form.max_output_tokens)),
+      timeout_seconds: Math.max(1, Math.min(600, form.timeout_seconds)),
+    };
+
+    if (!input.profile_id) {
+      setLocalError("Profile ID is required.");
+      return;
+    }
+    if (!input.provider_peer_id) {
+      setLocalError("Provider peer ID is required.");
+      return;
+    }
+    if (!input.prompt) {
+      setLocalError("Prompt is required.");
+      return;
+    }
+
+    try {
+      const response = await onSubmit(input);
+      setResult(response);
+    } catch {
+      // App-level error banner already shows daemon/Tauri failures.
+    }
+  }
+
+  return (
+    <section className="workspace-section">
+      <div className="section-intro">
+        <div>
+          <span className="eyebrow">INTERACTIVE PEER INFERENCE</span>
+          <h2>Send a private prompt to a provider peer.</h2>
+          <p>
+            This uses OSCIRIS request-response transport directly. Prompt and
+            response stay off public protocol announcements; the desktop shows
+            the signed response and commitment hashes returned by the provider.
+          </p>
+        </div>
+        <div className={daemonLive ? "inference-live-card live" : "inference-live-card"}>
+          <span className="status-dot" />
+          <strong>{daemonLive ? "Daemon ready" : "Daemon offline"}</strong>
+          <small>
+            {daemonLive
+              ? "Requires a provider running inference serve"
+              : "Start the daemon before submitting"}
+          </small>
+        </div>
+      </div>
+
+      <section className="inference-grid">
+        <form className="panel inference-form" onSubmit={submit}>
+          <div className="panel-heading">
+            <div>
+              <span className="eyebrow">REQUEST</span>
+              <h3>Prompt route</h3>
+            </div>
+            <span className="pending-badge">Private transport</span>
+          </div>
+
+          <div className="form-grid">
+            <label>
+              Requester ID
+              <input
+                maxLength={96}
+                onChange={(event) =>
+                  setForm({ ...form, requester_id: event.target.value })
+                }
+                value={form.requester_id}
+              />
+            </label>
+            <label>
+              Profile ID
+              <input
+                maxLength={120}
+                onChange={(event) =>
+                  setForm({ ...form, profile_id: event.target.value })
+                }
+                placeholder="qwen3-4b-local"
+                required
+                value={form.profile_id}
+              />
+            </label>
+            <label className="wide">
+              Provider peer ID
+              <input
+                maxLength={180}
+                onChange={(event) =>
+                  setForm({ ...form, provider_peer_id: event.target.value })
+                }
+                placeholder="12D3KooW..."
+                required
+                value={form.provider_peer_id}
+              />
+            </label>
+            <label className="wide">
+              Bootstrap peers
+              <textarea
+                onChange={(event) => setBootstrapText(event.target.value)}
+                placeholder="/ip4/192.168.1.10/tcp/4100/p2p/12D3KooW..."
+                rows={3}
+                value={bootstrapText}
+              />
+            </label>
+            <label>
+              Max output tokens
+              <input
+                max={4096}
+                min={1}
+                onChange={(event) =>
+                  setForm({
+                    ...form,
+                    max_output_tokens: Number(event.target.value),
+                  })
+                }
+                type="number"
+                value={form.max_output_tokens}
+              />
+            </label>
+            <label>
+              Timeout seconds
+              <input
+                max={600}
+                min={1}
+                onChange={(event) =>
+                  setForm({
+                    ...form,
+                    timeout_seconds: Number(event.target.value),
+                  })
+                }
+                type="number"
+                value={form.timeout_seconds}
+              />
+            </label>
+            <label className="wide">
+              Prompt
+              <textarea
+                maxLength={16_384}
+                onChange={(event) =>
+                  setForm({ ...form, prompt: event.target.value })
+                }
+                placeholder="Ask the remote provider model a test question…"
+                required
+                rows={7}
+                value={form.prompt}
+              />
+            </label>
+          </div>
+
+          {localError ? (
+            <div className="boundary-callout warning">
+              <strong>Request incomplete</strong>
+              <span>{localError}</span>
+            </div>
+          ) : (
+            <div className="boundary-callout">
+              <strong>Provider prerequisite</strong>
+              <span>
+                On the provider machine, run `osciris-node inference serve` with
+                a matching profile/runtime and give this desktop the provider
+                peer ID plus at least one reachable bootstrap multiaddr.
+              </span>
+            </div>
+          )}
+
+          <div className="composer-actions">
+            <button
+              className="primary-button"
+              disabled={!daemonLive || busy}
+              type="submit"
+            >
+              {busy ? "Waiting for response…" : "Send prompt"}
+            </button>
+          </div>
+        </form>
+
+        <article className="panel inference-result">
+          <div className="panel-heading">
+            <div>
+              <span className="eyebrow">SIGNED RESPONSE</span>
+              <h3>Provider output</h3>
+            </div>
+            {result ? (
+              <span className="pending-badge">{result.latency_ms} ms</span>
+            ) : null}
+          </div>
+
+          {result ? (
+            <>
+              <div className="response-box">{result.response_text}</div>
+              <dl className="definition-list mono-values">
+                <div>
+                  <dt>Request</dt>
+                  <dd>{short(result.request_id, 8)}</dd>
+                </div>
+                <div>
+                  <dt>Provider</dt>
+                  <dd>{short(result.provider_node_id)}</dd>
+                </div>
+                <div>
+                  <dt>Profile</dt>
+                  <dd>{result.profile_id}</dd>
+                </div>
+                <div>
+                  <dt>Request hash</dt>
+                  <dd>{short(result.request_sha256)}</dd>
+                </div>
+                <div>
+                  <dt>Response hash</dt>
+                  <dd>{short(result.response_sha256)}</dd>
+                </div>
+                <div>
+                  <dt>Tokens</dt>
+                  <dd>
+                    {result.prompt_tokens} prompt / {result.output_tokens} output
+                  </dd>
+                </div>
+              </dl>
+            </>
+          ) : (
+            <EmptyPanel
+              title="No response yet"
+              body="Submit a prompt to a reachable provider peer. The signed response metadata will appear here."
+            />
+          )}
+        </article>
+      </section>
     </section>
   );
 }
