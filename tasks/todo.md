@@ -1,5 +1,51 @@
 # Task Plan
 
+## Desktop Evidence Ingestion UI
+
+### Objective
+
+Give desktop users a visible way to import a provider evidence directory for a
+published/running job, using the daemon evidence-ingestion API added in the
+previous slice.
+
+### Spec
+
+- Add a desktop job-detail action for jobs that are in or beyond network
+  execution states and not yet completed.
+- Use the native directory picker so users select the provider evidence folder
+  containing `job_spec.json`, `execution_receipt.json`, and
+  `receipt_bundle.json`.
+- Call `ingestEvidence({ job_id, evidence_dir })`.
+- Replace the workspace state from the daemon response and surface any error in
+  the existing error banner.
+- Keep this manual and explicit; automatic remote fetching remains backend/node
+  scope.
+
+### Checklist
+
+- [x] Add desktop directory picker dependency/imports
+- [x] Add job-detail ingestion action
+- [x] Verify TypeScript build and Tauri bridge
+- [x] Update review notes and push
+
+### Review
+
+- Added Tauri dialog plugin support for native directory selection.
+- Added `Import evidence` action to job detail for queued/matching/running/
+  verifying jobs.
+- The action opens a directory picker, calls daemon `ingestEvidence`, replaces
+  workspace state from the daemon response, and keeps errors in the existing
+  action banner.
+- Added explanatory lifecycle callout describing the required evidence files
+  and daemon-side verification.
+- Verification passed:
+  - `cargo fmt --check`
+  - `cargo test --locked -p osciris-daemon`
+  - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop prepare:sidecar:debug`
+  - `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  - `pnpm --dir apps/desktop tauri build`
+
 ## Desktop Evidence Ingestion Bridge
 
 ### Objective

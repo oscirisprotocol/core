@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   configureWallet,
   createJob,
@@ -6,6 +7,7 @@ import {
   type DaemonStatus,
   getDaemonStatus,
   getWorkspace,
+  ingestEvidence,
   launchDaemon,
   prepareWithdrawal,
   publishJob,
@@ -98,6 +100,22 @@ export default function App() {
     await runAction(refreshProtocolJobs, (nextWorkspace) => {
       setWorkspace(nextWorkspace);
     });
+  }
+
+  async function ingestJobEvidence(jobId: string) {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "Select provider evidence directory",
+    });
+    if (typeof selected !== "string") return;
+    await runAction(
+      () => ingestEvidence({ job_id: jobId, evidence_dir: selected }),
+      (nextWorkspace) => {
+        setWorkspace(nextWorkspace);
+        setSelectedJobId(jobId);
+      },
+    );
   }
 
   useEffect(() => {
@@ -286,6 +304,7 @@ export default function App() {
                   await refreshProtocol();
                 })
               }
+              onIngestEvidence={(jobId) => void ingestJobEvidence(jobId)}
               busy={busy}
             />
           ) : view === "overview" ? (

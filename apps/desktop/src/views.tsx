@@ -553,14 +553,19 @@ export function JobDetailView({
   onBack,
   onSubmit,
   onPublish,
+  onIngestEvidence,
 }: {
   job: DesktopJob;
   busy: boolean;
   onBack: () => void;
   onSubmit: (jobId: string) => void;
   onPublish: (jobId: string) => void;
+  onIngestEvidence: (jobId: string) => void;
 }) {
   const current = lifecycle.indexOf(job.state);
+  const canIngestEvidence = ["queued", "matching", "running", "verifying"].includes(
+    job.state,
+  );
   return (
     <section className="workspace-section">
       <div className="detail-toolbar">
@@ -587,6 +592,16 @@ export function JobDetailView({
               type="button"
             >
               Publish protocol job
+            </button>
+          ) : null}
+          {canIngestEvidence ? (
+            <button
+              className="secondary-button"
+              disabled={busy}
+              onClick={() => onIngestEvidence(job.job_id)}
+              type="button"
+            >
+              Import evidence
             </button>
           ) : null}
         </div>
@@ -637,6 +652,16 @@ export function JobDetailView({
               Publishing records a signed local job announcement for provider
               matching. External wallet funding and network execution remain
               separate steps.
+            </span>
+          </div>
+        ) : null}
+        {canIngestEvidence ? (
+          <div className="boundary-callout">
+            <strong>Provider evidence can be imported manually</strong>
+            <span>
+              Select the provider evidence folder containing job_spec,
+              execution_receipt, and receipt_bundle JSON files. The daemon will
+              verify signatures and hashes before updating this job.
             </span>
           </div>
         ) : null}
