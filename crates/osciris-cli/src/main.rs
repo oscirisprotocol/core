@@ -32,14 +32,15 @@ use osciris_core::{
 };
 use osciris_node::network::{
     auto_fetch_receipts, create_inference_request, fetch_receipt_bundle_p2p,
-    job_matches_provider_capability, peer_id_from_signing_seed, run_auto_provider, serve_inference,
-    serve_presence, wait_for_inference_response, AutoProviderConfig, AutoVerifierConfig,
-    BundleFetchConfig, InferenceRuntimeConfig, InferenceServeConfig, InferenceSubmitConfig,
-    InferenceWaitConfig, NetworkServeConfig,
+    install_pinned_inference_profile, job_matches_provider_capability, peer_id_from_signing_seed,
+    pinned_inference_model_path, run_auto_provider, serve_inference, serve_presence,
+    wait_for_inference_response, AutoProviderConfig, AutoVerifierConfig, BundleFetchConfig,
+    InferenceRuntimeConfig, InferenceServeConfig, InferenceSubmitConfig, InferenceWaitConfig,
+    NetworkServeConfig,
 };
 use osciris_node::status::{
-    build_provider_network_status, calculate_quorum_status, calculate_settlement_status,
-    QuorumStatusReport, SettlementStatusReport,
+    build_inference_readiness_report, build_provider_network_status, calculate_quorum_status,
+    calculate_settlement_status, QuorumStatusReport, SettlementStatusReport,
 };
 use osciris_node::store::ProtocolStore;
 use osciris_node::{run_job, ProviderConfig};
@@ -163,6 +164,8 @@ enum Commands {
         signing_key_id: String,
         #[arg(long)]
         signing_key_seed_base64: String,
+        #[arg(long)]
+        announcement_output: Option<PathBuf>,
     },
     RegisterProvider {
         #[arg(long)]
@@ -724,6 +727,14 @@ enum NetworkCommands {
 
 #[derive(Debug, Subcommand)]
 enum InferenceCommands {
+    ProfileInstall {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        source_model_path: PathBuf,
+    },
     Serve {
         #[arg(long)]
         work_root: PathBuf,
@@ -739,6 +750,16 @@ enum InferenceCommands {
         runtime: String,
         #[arg(long)]
         llama_cpp_endpoint: Option<String>,
+        #[arg(long)]
+        llama_server_path: Option<PathBuf>,
+        #[arg(long)]
+        model_path: Option<PathBuf>,
+        #[arg(long, default_value = "127.0.0.1")]
+        managed_llama_host: String,
+        #[arg(long, default_value_t = 8080)]
+        managed_llama_port: u16,
+        #[arg(long, default_value_t = 8192)]
+        managed_llama_ctx_size: u32,
         #[arg(long, default_value = "/ip4/127.0.0.1/tcp/0")]
         listen_addr: String,
         #[arg(long = "bootstrap-peer")]
@@ -787,6 +808,12 @@ enum InferenceCommands {
         timeout_seconds: u64,
         #[arg(long)]
         output: Option<PathBuf>,
+    },
+    Readiness {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        profile: String,
     },
 }
 
@@ -1111,11 +1138,12 @@ fn main() -> Result<()> {
             verifier_id,
             signing_key_id,
             signing_key_seed_base64,
+            announcement_output,
         } => {
             let verifier = VerifierConfig {
-                verifier_id,
+                verifier_id: verifier_id.clone(),
                 signing_key_id,
-                signing_key_seed_base64,
+                signing_key_seed_base64: signing_key_seed_base64.clone(),
             };
             let output = if let Some(chain_config) = chain_config {
                 let chain = OscirisChain::new(ChainConfig::from_path(&chain_config)?)?;
@@ -1131,6 +1159,19 @@ fn main() -> Result<()> {
                     &verifier,
                 ))?
             };
+            if let Some(announcement_output) = announcement_output {
+                let announcement = build_verification_receipt_announcement(
+                    &output.verification_receipt_path,
+                    &verifier_id,
+                    &signing_key_seed_base64,
+                )?;
+                if let Some(parent) = announcement_output.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("failed to create {}", parent.display()))?;
+                }
+                fs::write(&announcement_output, serde_json::to_vec_pretty(&announcement)?)
+                    .with_context(|| format!("failed to write {}", announcement_output.display()))?;
+            }
             println!("{}", output.verification_receipt_path.display());
         }
         Commands::RegisterProvider {
@@ -2227,6 +2268,20 @@ fn main() -> Result<()> {
             }
         },
         Commands::Inference { command } => match command {
+            InferenceCommands::ProfileInstall {
+                work_root,
+                profile,
+                source_model_path,
+            } => {
+                if profile != "osciris-qwen3-4b-q4-v1" {
+                    bail!("unsupported pinned inference profile {profile:?}");
+                }
+                let summary = install_pinned_inference_profile(
+                    &work_root.join(".osciris"),
+                    &source_model_path,
+                )?;
+                print_json(&summary)?;
+            }
             InferenceCommands::Serve {
                 work_root,
                 signing_key_seed_base64,
@@ -2235,6 +2290,11 @@ fn main() -> Result<()> {
                 profile_id,
                 runtime: inference_runtime,
                 llama_cpp_endpoint,
+                llama_server_path,
+                model_path,
+                managed_llama_host,
+                managed_llama_port,
+                managed_llama_ctx_size,
                 listen_addr,
                 bootstrap_peers,
                 run_seconds,
@@ -2244,9 +2304,22 @@ fn main() -> Result<()> {
                 let summary = runtime.block_on(serve_inference(&InferenceServeConfig {
                     protocol_root: work_root.join(".osciris"),
                     signing_key_seed_base64,
+                    signing_key_id: None,
                     provider_id,
                     profile_id,
-                    runtime: parse_inference_runtime(&inference_runtime, llama_cpp_endpoint)?,
+                    runtime: parse_inference_runtime(
+                        &inference_runtime,
+                        llama_cpp_endpoint,
+                        llama_server_path,
+                        model_path.or_else(|| {
+                            (inference_runtime == "llama-cpp-managed"
+                                || inference_runtime == "llama_cpp_managed")
+                                .then(|| pinned_inference_model_path(&work_root.join(".osciris")))
+                        }),
+                        managed_llama_host,
+                        managed_llama_port,
+                        managed_llama_ctx_size,
+                    )?,
                     listen_addr,
                     bootstrap_peers,
                     run_for: Duration::from_secs(run_seconds),
@@ -2278,6 +2351,7 @@ fn main() -> Result<()> {
                 })?;
                 let summary =
                     runtime.block_on(wait_for_inference_response(&InferenceWaitConfig {
+                        protocol_root: work_root.join(".osciris"),
                         signing_key_seed_base64,
                         request: request.clone(),
                         provider_peer_id,
@@ -2307,6 +2381,7 @@ fn main() -> Result<()> {
                 )?;
                 let summary =
                     runtime.block_on(wait_for_inference_response(&InferenceWaitConfig {
+                        protocol_root: work_root.join(".osciris"),
                         signing_key_seed_base64,
                         request,
                         provider_peer_id,
@@ -2318,6 +2393,22 @@ fn main() -> Result<()> {
                     fs::write(&output, serde_json::to_vec_pretty(&summary)?)?;
                 }
                 print_json(&summary)?;
+            }
+            InferenceCommands::Readiness { work_root, profile } => {
+                let store = runtime.block_on(ProtocolStore::open(&work_root.join(".osciris")))?;
+                let peer_presences = runtime.block_on(store.list_peer_presences())?;
+                let stored_capabilities = runtime.block_on(store.list_provider_capabilities())?;
+                let mut capabilities = Vec::with_capacity(stored_capabilities.len());
+                for capability in stored_capabilities {
+                    if let Some(full) =
+                        runtime.block_on(store.load_provider_capability(&capability.node_id))?
+                    {
+                        capabilities.push(full);
+                    }
+                }
+                let report =
+                    build_inference_readiness_report(&profile, &peer_presences, &capabilities);
+                print_json(&report)?;
             }
         },
     }
@@ -3347,6 +3438,11 @@ fn load_signing_seed_from_source(
 fn parse_inference_runtime(
     runtime: &str,
     llama_cpp_endpoint: Option<String>,
+    llama_server_path: Option<PathBuf>,
+    model_path: Option<PathBuf>,
+    managed_llama_host: String,
+    managed_llama_port: u16,
+    managed_llama_ctx_size: u32,
 ) -> Result<InferenceRuntimeConfig> {
     match runtime {
         "deterministic" => Ok(InferenceRuntimeConfig::Deterministic),
@@ -3358,8 +3454,21 @@ fn parse_inference_runtime(
                 })?;
             Ok(InferenceRuntimeConfig::LlamaCppServer { endpoint })
         }
+        "llama-cpp-managed" | "llama_cpp_managed" => {
+            let llama_server_path = llama_server_path
+                .ok_or_else(|| anyhow!("--llama-server-path is required for --runtime llama-cpp-managed"))?;
+            let model_path = model_path
+                .ok_or_else(|| anyhow!("--model-path is required for --runtime llama-cpp-managed"))?;
+            Ok(InferenceRuntimeConfig::ManagedLlamaCpp {
+                llama_server_path,
+                model_path,
+                host: managed_llama_host,
+                port: managed_llama_port,
+                ctx_size: managed_llama_ctx_size,
+            })
+        }
         other => {
-            bail!("unsupported inference runtime {other:?}; expected deterministic or llama-cpp")
+            bail!("unsupported inference runtime {other:?}; expected deterministic, llama-cpp, or llama-cpp-managed")
         }
     }
 }
@@ -4015,6 +4124,30 @@ async fn record_verified_verification_receipt_announcement(
     Ok(announcement.verification_receipt.clone())
 }
 
+fn build_verification_receipt_announcement(
+    verification_receipt_path: &Path,
+    verifier_id: &str,
+    signing_key_seed_base64: &str,
+) -> Result<VerificationReceiptAnnouncement> {
+    let receipt: VerificationReceipt = serde_json::from_slice(
+        &fs::read(verification_receipt_path)
+            .with_context(|| format!("failed to read {}", verification_receipt_path.display()))?,
+    )?;
+    if receipt.verifier_id != verifier_id {
+        bail!(
+            "verification receipt verifier_id {} does not match requested verifier_id {}",
+            receipt.verifier_id,
+            verifier_id
+        );
+    }
+    let signing_key = load_signing_key_from_base64_seed(signing_key_seed_base64)?;
+    Ok(VerificationReceiptAnnouncement {
+        verifier_node_id: verifier_id.to_string(),
+        verifier_ed25519_public_key_base64: verifying_key_to_base64(&signing_key.verifying_key()),
+        verification_receipt: receipt,
+    })
+}
+
 fn resolve_provider_address(
     execution_receipt: &ExecutionReceipt,
     provider_address: Option<&str>,
@@ -4296,6 +4429,42 @@ mod tests {
             .unwrap();
         assert!(receipts.is_empty());
         std::fs::remove_dir_all(work_root).unwrap();
+    }
+
+    #[test]
+    fn build_verification_announcement_from_receipt_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let seed = "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=";
+        let signing_key = load_signing_key_from_base64_seed(seed).unwrap();
+        let verifier_id = "verifier-a";
+        let mut receipt = verification_receipt(verifier_id);
+        receipt.signature = sign_verification_receipt(&receipt, &signing_key).unwrap();
+        let path = directory.path().join("verification_receipt.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+        let announcement =
+            build_verification_receipt_announcement(&path, verifier_id, seed).unwrap();
+        assert_eq!(announcement.verifier_node_id, verifier_id);
+        assert_eq!(
+            announcement.verifier_ed25519_public_key_base64,
+            verifying_key_to_base64(&signing_key.verifying_key())
+        );
+        assert_eq!(announcement.verification_receipt, receipt);
+    }
+
+    #[test]
+    fn build_verification_announcement_rejects_verifier_mismatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let seed = "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=";
+        let signing_key = load_signing_key_from_base64_seed(seed).unwrap();
+        let mut receipt = verification_receipt("verifier-a");
+        receipt.signature = sign_verification_receipt(&receipt, &signing_key).unwrap();
+        let path = directory.path().join("verification_receipt.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+        let error =
+            build_verification_receipt_announcement(&path, "verifier-b", seed).unwrap_err();
+        assert!(error.to_string().contains("does not match requested verifier_id"));
     }
 
     #[test]

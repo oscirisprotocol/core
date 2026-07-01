@@ -47,7 +47,9 @@ observes and imports their signed protocol outputs.
 Question: can a developer send a prompt from Desktop to another machine for
 test inference?
 
-Current answer: not yet as an interactive one-click Desktop prompt round trip.
+Current answer: yes, through the current desktop test inference surface and
+signed peer transport. The remaining gap is verified multi-host provider and
+verifier quorum at release quality.
 
 What works today:
 
@@ -62,19 +64,16 @@ What works today:
 What is not yet implemented:
 
 - Desktop does not start/join the P2P network from the UI.
-- Desktop does not yet expose an interactive prompt submission surface.
-- The backend target commands documented in
-  `docs/milestones/provider_local_inference_roundtrip.md` —
-  `osciris-node inference serve`, `osciris-node inference submit`, and
-  `osciris-node inference wait` — are milestone targets, not available in
-  v0.1.1.
-- The current backend proves asynchronous accountable jobs. It does not yet
-  provide direct prompt/result peer transport back to the desktop.
+- Desktop does not yet expose a full network bootstrap workflow from the UI.
+- The current backend still needs a verified remote multi-host prompt round
+  trip with verifier quorum before the release claim becomes public beta
+  quality.
+- Public beta release assets and manifest publication remain a separate
+  release step from the desktop protocol work.
 
-Use `docs/multi_host_testnet_join_guide.md` today for testing inference on
-another machine via the asynchronous provider/verifier flow. Build the
-interactive prompt round trip next by implementing the inference peer transport
-milestone and then exposing it through the daemon/Desktop UI.
+Use `docs/multi_host_testnet_join_guide.md` today for multi-host CLI testing
+and the desktop `Test inference` surface for signed prompt transport and
+verifier-ready evidence capture.
 
 ## Wallet Boundary
 

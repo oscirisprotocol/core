@@ -105,6 +105,9 @@ export interface InferencePromptResult {
   prompt_tokens: number;
   output_tokens: number;
   latency_ms: number;
+  evidence_dir: string;
+  execution_receipt_sha256: string;
+  bundle_sha256: string;
 }
 
 export interface JobEvidenceSummary {

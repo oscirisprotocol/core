@@ -820,7 +820,27 @@ export function InferenceView({
                     {result.prompt_tokens} prompt / {result.output_tokens} output
                   </dd>
                 </div>
+                <div>
+                  <dt>Receipt hash</dt>
+                  <dd>{short(result.execution_receipt_sha256)}</dd>
+                </div>
+                <div>
+                  <dt>Bundle hash</dt>
+                  <dd>{short(result.bundle_sha256)}</dd>
+                </div>
+                <div>
+                  <dt>Evidence dir</dt>
+                  <dd title={result.evidence_dir}>{result.evidence_dir}</dd>
+                </div>
               </dl>
+              <div className="boundary-callout">
+                <strong>Verifier-ready evidence stored</strong>
+                <span>
+                  The requester now has a local receipt bundle at the shown
+                  evidence directory. A verifier can review that bundle without
+                  re-fetching the prompt response from the provider.
+                </span>
+              </div>
             </>
           ) : (
             <EmptyPanel

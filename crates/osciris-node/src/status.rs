@@ -2,13 +2,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Utc};
 use osciris_core::{
-    ChallengeRecord, ChallengeStatus, ReceiptBundle, VerificationReceipt, VerificationStatus,
+    ChallengeRecord, ChallengeStatus, NodeStatus, ProviderCapability, ReceiptBundle,
+    VerificationReceipt, VerificationStatus,
 };
 use serde::Serialize;
 use uuid::Uuid;
 
 use crate::store::{
-    StoredJobAssignment, StoredJobClaim, StoredProviderCapability, StoredReceiptAvailability,
+    StoredJobAssignment, StoredJobClaim, StoredPeerPresence, StoredProviderCapability,
+    StoredReceiptAvailability,
 };
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -104,6 +106,23 @@ pub struct ProviderNetworkStatusReport {
     pub degraded_provider_count: usize,
     pub offline_provider_count: usize,
     pub providers: Vec<ProviderStatusRow>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct InferenceReadinessReport {
+    pub profile_id: String,
+    pub provider_target: u32,
+    pub healthy_providers: u32,
+    pub provider_gap: u32,
+    pub slot_target: u32,
+    pub available_slots: u32,
+    pub slot_gap: u32,
+    pub verifier_target: u32,
+    pub online_verifiers: u32,
+    pub verifier_gap: u32,
+    pub compatible_provider_ids: Vec<String>,
+    pub available_provider_ids: Vec<String>,
+    pub online_verifier_ids: Vec<String>,
 }
 
 pub fn calculate_quorum_status(
@@ -420,10 +439,98 @@ fn provider_availability(
     }
 }
 
+pub fn build_inference_readiness_report(
+    profile_id: &str,
+    peer_presences: &[StoredPeerPresence],
+    provider_capabilities: &[ProviderCapability],
+) -> InferenceReadinessReport {
+    const PROVIDER_TARGET: u32 = 4;
+    const SLOT_TARGET: u32 = 3;
+    const VERIFIER_TARGET: u32 = 2;
+    const ONLINE_FRESHNESS_MINUTES: i64 = 15;
+
+    let freshness_cutoff = Utc::now() - Duration::minutes(ONLINE_FRESHNESS_MINUTES);
+
+    let mut compatible_provider_ids = provider_capabilities
+        .iter()
+        .filter(|capability| provider_is_healthy_for_inference(capability, freshness_cutoff))
+        .filter(|capability| provider_supports_inference(capability))
+        .map(|capability| capability.node_id.clone())
+        .collect::<Vec<_>>();
+    compatible_provider_ids.sort();
+
+    let mut available_provider_ids = provider_capabilities
+        .iter()
+        .filter(|capability| provider_is_healthy_for_inference(capability, freshness_cutoff))
+        .filter(|capability| provider_supports_inference(capability))
+        .filter(|capability| capability.active_job_count == 0)
+        .map(|capability| capability.node_id.clone())
+        .collect::<Vec<_>>();
+    available_provider_ids.sort();
+
+    let mut online_verifier_ids = peer_presences
+        .iter()
+        .filter(|presence| presence.role == "verifier")
+        .filter(|presence| peer_is_online(&presence.status))
+        .filter_map(|presence| {
+            let seen_at = parse_rfc3339_utc(&presence.last_seen_at)?;
+            (seen_at >= freshness_cutoff).then(|| presence.node_id.clone())
+        })
+        .collect::<Vec<_>>();
+    online_verifier_ids.sort();
+    online_verifier_ids.dedup();
+
+    let healthy_providers = compatible_provider_ids.len() as u32;
+    let available_slots = available_provider_ids.len() as u32;
+    let online_verifiers = online_verifier_ids.len() as u32;
+
+    InferenceReadinessReport {
+        profile_id: profile_id.to_string(),
+        provider_target: PROVIDER_TARGET,
+        healthy_providers,
+        provider_gap: PROVIDER_TARGET.saturating_sub(healthy_providers),
+        slot_target: SLOT_TARGET,
+        available_slots,
+        slot_gap: SLOT_TARGET.saturating_sub(available_slots),
+        verifier_target: VERIFIER_TARGET,
+        online_verifiers,
+        verifier_gap: VERIFIER_TARGET.saturating_sub(online_verifiers),
+        compatible_provider_ids,
+        available_provider_ids,
+        online_verifier_ids,
+    }
+}
+
+fn provider_supports_inference(capability: &ProviderCapability) -> bool {
+    capability
+        .supported_job_types
+        .iter()
+        .any(|job_type| matches!(job_type, osciris_core::JobType::InferenceEconomics))
+        && capability.supported_runtimes.iter().any(|runtime| {
+            let runtime = runtime.to_ascii_lowercase();
+            runtime == "llama-cpp" || runtime == "deterministic"
+        })
+}
+
+fn provider_is_healthy_for_inference(
+    capability: &ProviderCapability,
+    freshness_cutoff: DateTime<Utc>,
+) -> bool {
+    matches!(capability.status, NodeStatus::OnlineIdle | NodeStatus::OnlineBusy)
+        && parse_rfc3339_utc(&capability.updated_at)
+            .is_some_and(|updated_at| updated_at >= freshness_cutoff)
+}
+
+fn peer_is_online(status: &str) -> bool {
+    matches!(status, "online_idle" | "online_busy")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use osciris_core::{ChainSubmissionStatus, ChallengeReasonCode, VerificationChecks};
+    use osciris_core::{
+        ChainSubmissionStatus, ChallengeReasonCode, JobType, NodeStatus, VerificationChecks,
+    };
 
     fn receipt(job_id: Uuid, verifier_id: &str, status: VerificationStatus) -> VerificationReceipt {
         VerificationReceipt {
@@ -791,5 +898,74 @@ mod tests {
         assert_eq!(report.providers[0].availability, ProviderAvailability::Free);
         assert!(report.providers[0].open_claimed_job_ids.is_empty());
         assert_eq!(report.providers[0].completed_job_ids, vec!["job-1"]);
+    }
+
+    fn peer_presence(node_id: &str, role: &str, status: &str, last_seen_at: &str) -> StoredPeerPresence {
+        StoredPeerPresence {
+            node_id: node_id.to_string(),
+            role: role.to_string(),
+            status: status.to_string(),
+            current_load: 0.0,
+            active_job_count: 0,
+            last_seen_at: last_seen_at.to_string(),
+        }
+    }
+
+    fn inference_capability(
+        node_id: &str,
+        status: NodeStatus,
+        active_job_count: u32,
+        updated_at: &str,
+    ) -> ProviderCapability {
+        ProviderCapability {
+            node_id: node_id.to_string(),
+            ed25519_public_key_base64: "provider-public-key".to_string(),
+            host_class: "interactive-inference".to_string(),
+            gpu_model: "NVIDIA A10G".to_string(),
+            gpu_count: 1,
+            vram_gb: 24.0,
+            cuda_available: true,
+            mps_available: false,
+            supported_job_types: vec![JobType::InferenceEconomics],
+            supported_runtimes: vec!["llama-cpp".to_string()],
+            pricing_hint: None,
+            current_load: if active_job_count == 0 { 0.0 } else { 0.8 },
+            active_job_count,
+            status,
+            updated_at: updated_at.to_string(),
+            signature: "signature".to_string(),
+        }
+    }
+
+    #[test]
+    fn inference_readiness_counts_healthy_providers_slots_and_verifiers() {
+        let now = Utc::now();
+        let fresh = now.to_rfc3339();
+        let stale = (now - Duration::minutes(16)).to_rfc3339();
+        let presences = vec![
+            peer_presence("verifier-1", "verifier", "online_idle", &fresh),
+            peer_presence("verifier-2", "verifier", "online_busy", &fresh),
+            peer_presence("verifier-3", "verifier", "online_idle", &stale),
+        ];
+        let capabilities = vec![
+            inference_capability("provider-1", NodeStatus::OnlineIdle, 0, &fresh),
+            inference_capability("provider-2", NodeStatus::OnlineBusy, 1, &fresh),
+            inference_capability("provider-3", NodeStatus::Degraded, 0, &fresh),
+            inference_capability("provider-4", NodeStatus::OnlineIdle, 0, &stale),
+        ];
+
+        let report =
+            build_inference_readiness_report("osciris-qwen3-4b-q4-v1", &presences, &capabilities);
+
+        assert_eq!(report.profile_id, "osciris-qwen3-4b-q4-v1");
+        assert_eq!(report.healthy_providers, 2);
+        assert_eq!(report.provider_gap, 2);
+        assert_eq!(report.available_slots, 1);
+        assert_eq!(report.slot_gap, 2);
+        assert_eq!(report.online_verifiers, 2);
+        assert_eq!(report.verifier_gap, 0);
+        assert_eq!(report.compatible_provider_ids, vec!["provider-1", "provider-2"]);
+        assert_eq!(report.available_provider_ids, vec!["provider-1"]);
+        assert_eq!(report.online_verifier_ids, vec!["verifier-1", "verifier-2"]);
     }
 }

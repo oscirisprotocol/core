@@ -26,4 +26,5 @@ uuid.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+osciris-verifier = { path = "../osciris-verifier" }
 tempfile.workspace = true

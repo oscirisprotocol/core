@@ -44,7 +44,7 @@ use osciris_node::network::{
     create_inference_request, job_matches_provider_capability, serve_presence,
     wait_for_inference_response, InferenceSubmitConfig, InferenceWaitConfig, NetworkServeConfig,
 };
-use osciris_node::status::calculate_quorum_status;
+use osciris_node::status::{build_inference_readiness_report, calculate_quorum_status};
 use osciris_node::store::ProtocolStore;
 
 pub const API_VERSION: u16 = 1;
@@ -54,6 +54,7 @@ pub const HORIZEN_TESTNET_RPC_URL: &str = "https://horizen-testnet.rpc.caldera.x
 pub const HORIZEN_TESTNET_EXPLORER_URL: &str = "https://horizen-testnet.explorer.caldera.xyz";
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+const DESKTOP_INFERENCE_PROFILE_ID: &str = "osciris-qwen3-4b-q4-v1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LocalEndpoint {
@@ -483,6 +484,9 @@ pub struct InferencePromptResult {
     pub prompt_tokens: u32,
     pub output_tokens: u32,
     pub latency_ms: u64,
+    pub evidence_dir: String,
+    pub execution_receipt_sha256: String,
+    pub bundle_sha256: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -749,6 +753,7 @@ impl DaemonService {
         } else {
             NetworkState::NotConfigured
         };
+        let readiness = self.load_readiness_summary().await.ok().flatten();
         DaemonStatus {
             api_version: API_VERSION,
             daemon_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -775,8 +780,55 @@ impl DaemonService {
                 operating_system: env::consts::OS.to_string(),
                 architecture: env::consts::ARCH.to_string(),
             },
-            readiness: None,
+            readiness,
         }
+    }
+
+    async fn load_readiness_summary(&self) -> Result<Option<ReadinessSummary>> {
+        let protocol_store = ProtocolStore::open(&self.inner.state_dir.join("protocol"))
+            .await
+            .context("open daemon protocol store")?;
+        let peer_presences = protocol_store
+            .list_peer_presences()
+            .await
+            .context("list peer presences for readiness")?;
+        let stored_capabilities = protocol_store
+            .list_provider_capabilities()
+            .await
+            .context("list provider capabilities for readiness")?;
+        if peer_presences.is_empty() && stored_capabilities.is_empty() {
+            return Ok(None);
+        }
+
+        let mut capabilities = Vec::with_capacity(stored_capabilities.len());
+        for capability in stored_capabilities {
+            if let Some(full) = protocol_store
+                .load_provider_capability(&capability.node_id)
+                .await
+                .with_context(|| {
+                    format!("load provider capability {} for readiness", capability.node_id)
+                })?
+            {
+                capabilities.push(full);
+            }
+        }
+
+        let report = build_inference_readiness_report(
+            DESKTOP_INFERENCE_PROFILE_ID,
+            &peer_presences,
+            &capabilities,
+        );
+        Ok(Some(ReadinessSummary {
+            provider_target: report.provider_target,
+            healthy_providers: report.healthy_providers,
+            provider_gap: report.provider_gap,
+            slot_target: report.slot_target,
+            available_slots: report.available_slots,
+            slot_gap: report.slot_gap,
+            verifier_target: report.verifier_target,
+            online_verifiers: report.online_verifiers,
+            verifier_gap: report.verifier_gap,
+        }))
     }
 
     async fn workspace(&self) -> WorkspaceSnapshot {
@@ -1256,6 +1308,7 @@ impl DaemonService {
             max_output_tokens,
         })?;
         let summary = wait_for_inference_response(&InferenceWaitConfig {
+            protocol_root: self.inner.state_dir.join("protocol"),
             signing_key_seed_base64,
             request,
             provider_peer_id: input.provider_peer_id,
@@ -1274,6 +1327,9 @@ impl DaemonService {
             prompt_tokens: summary.response.prompt_tokens,
             output_tokens: summary.response.output_tokens,
             latency_ms: summary.response.latency_ms,
+            evidence_dir: summary.evidence_dir.display().to_string(),
+            execution_receipt_sha256: summary.execution_receipt_sha256,
+            bundle_sha256: summary.bundle_sha256,
         })
     }
 
@@ -2530,6 +2586,65 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("provider_peer_id must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn status_reports_readiness_when_protocol_state_exists() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DaemonService::new(directory.path().to_path_buf()).unwrap();
+        let store = ProtocolStore::open(&directory.path().join("protocol"))
+            .await
+            .unwrap();
+
+        let presence = osciris_core::PeerPresence {
+            node_id: "verifier-1".to_string(),
+            role: NodeRole::Verifier,
+            ed25519_public_key_base64: "verifier-public-key".to_string(),
+            evm_address: None,
+            listen_addrs: vec!["/ip4/127.0.0.1/tcp/9000".to_string()],
+            relay_capable: false,
+            protocol_version: "0.1.0".to_string(),
+            client_version: "osciris-node/0.1.1".to_string(),
+            status: NodeStatus::OnlineIdle,
+            current_load: 0.0,
+            active_job_count: 0,
+            last_seen_at: Utc::now().to_rfc3339(),
+            capability_version: Some("interactive-inference-v1".to_string()),
+            signature: "signature".to_string(),
+        };
+        store.record_peer_presence(&presence).await.unwrap();
+
+        let capability = ProviderCapability {
+            node_id: "provider-1".to_string(),
+            ed25519_public_key_base64: "provider-public-key".to_string(),
+            host_class: "interactive-inference".to_string(),
+            gpu_model: "NVIDIA A10G".to_string(),
+            gpu_count: 1,
+            vram_gb: 24.0,
+            cuda_available: true,
+            mps_available: false,
+            supported_job_types: vec![JobType::InferenceEconomics],
+            supported_runtimes: vec!["llama-cpp".to_string()],
+            pricing_hint: None,
+            current_load: 0.0,
+            active_job_count: 0,
+            status: NodeStatus::OnlineIdle,
+            updated_at: Utc::now().to_rfc3339(),
+            signature: "signature".to_string(),
+        };
+        store.record_provider_capability(&capability).await.unwrap();
+
+        let status = service.status().await;
+        let readiness = status.readiness.expect("expected readiness summary");
+        assert_eq!(readiness.provider_target, 4);
+        assert_eq!(readiness.healthy_providers, 1);
+        assert_eq!(readiness.provider_gap, 3);
+        assert_eq!(readiness.slot_target, 3);
+        assert_eq!(readiness.available_slots, 1);
+        assert_eq!(readiness.slot_gap, 2);
+        assert_eq!(readiness.verifier_target, 2);
+        assert_eq!(readiness.online_verifiers, 1);
+        assert_eq!(readiness.verifier_gap, 1);
     }
 
     #[tokio::test]

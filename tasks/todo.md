@@ -94,9 +94,9 @@ expose that path through daemon/Desktop.
 - [x] Add core inference request/result data structures and signatures
 - [x] Add libp2p inference request-response protocol
 - [x] Add CLI `inference serve/submit/wait`
-- [ ] Add provider model-server supervisor for pinned profile
-- [ ] Add daemon/Desktop network join/start controls
-- [ ] Add desktop prompt submission and response display
+- [x] Add pinned-profile install plus provider-managed llama.cpp startup
+- [x] Add daemon/Desktop network join/start controls
+- [x] Add desktop prompt submission and response display
 - [x] Verify local and multi-process transport tests
 
 ### Review
@@ -120,12 +120,35 @@ expose that path through daemon/Desktop.
     llama.cpp-compatible server such as `llama-server`
 - The llama.cpp adapter forwards prompts to `/completion` on an already-running
   provider-local server and signs the returned content. Full profile
-  installation/download and process supervision remains pending.
+  installation/download and process supervision are now partially covered:
+  - `osciris-node inference profile install` verifies the pinned Qwen GGUF
+    SHA-256 before copying it under `.osciris/profiles/...`
+  - `osciris-node inference serve --runtime llama-cpp-managed` can launch a
+    provider-local `llama-server` process against that installed artifact
+  - remote artifact download/bootstrap is still not implemented
+- Interactive inference now writes verifier-ready evidence on both sides of the
+  transport:
+  - provider `inference serve` materializes `job_spec.json`,
+    `inference_request.json`, `inference_response.json`,
+    `execution_receipt.json`, `receipt_bundle.json`, `bundle_index.json`, and
+    `python-output/inference_economics.json` under `.osciris/evidence/<request-id>`
+  - requester `inference submit/wait` now stores and validates the returned
+    signed evidence bundle locally using the existing receipt-bundle path
+  - the interactive transport also ships a signed provider capability record so
+    `osciris-verifier` can validate the stored evidence without out-of-band
+    capability seeding
 - Verification passed:
+  - `cargo test -p osciris-node pinned_profile_install_rejects_hash_mismatch --locked -- --nocapture`
+  - `cargo test -p osciris-node managed_llama_runtime_uses_local_endpoint --locked -- --nocapture`
   - `cargo test -p osciris-node inference_request_response_signatures_verify --locked -- --nocapture`
+  - `cargo test -p osciris-node inference_llama_cpp_runtime_signs_endpoint_response --locked -- --nocapture`
+  - `cargo test -p osciris-node inference_submit_round_trip_stores_verifier_ready_evidence --locked -- --nocapture`
+  - `cargo test -p osciris-node interactive_inference_evidence_verifies_locally --locked -- --nocapture`
   - `cargo test -p osciris-core inference_request_and_response_signatures_round_trip --locked -- --nocapture`
   - local two-process loopback CLI round trip from `inference submit` to
     `inference serve`
+  - local two-process loopback CLI round trip through the `llama-cpp` runtime
+    adapter against a `/completion`-compatible endpoint
   - `cargo fmt --check`
   - `cargo test -p osciris-core --locked`
   - `cargo test -p osciris-node --locked`
@@ -146,12 +169,11 @@ OSCIRIS peer transport.
 - Backend CLI supports multi-host off-chain participation with `network serve`,
   `network run-provider`, `network run-verifier`, provider claims,
   assignments, execution receipts, receipt fetching, and quorum.
-- Interactive prompt/result transport is not implemented yet. The milestone
-  doc explicitly says `osciris-node inference submit/wait/serve` are target
-  commands, not available in v0.1.1.
-- Therefore: a prompt can be tested on another machine today only as an
-  asynchronous inference-economics job through the CLI/provider flow, not as a
-  one-click desktop prompt request with direct response transport.
+- Interactive prompt/result transport is now implemented in the branch through
+  `osciris-node inference serve/submit/wait` and the desktop `Test inference`
+  view.
+- Therefore: the remaining gap is a verified remote multi-host provider plus
+  verifier quorum path, not the existence of direct prompt transport itself.
 
 ### Spec
 
@@ -179,6 +201,7 @@ OSCIRIS peer transport.
 - [x] Confirm current backend/desktop boundary
 - [x] Implement interactive inference peer transport commands
 - [x] Expose network join/serve status through daemon/Desktop
+- [x] Expose readiness gap summary through CLI/daemon status
 - [x] Add desktop prompt submission and response UI
 - [ ] Verify multi-host prompt round trip with at least one remote provider
       and verifier quorum
@@ -201,15 +224,101 @@ OSCIRIS peer transport.
   presence serving, and reports online/degraded/not-configured state.
 - Network start creates the daemon protocol identity in the protocol store when
   missing, using the daemon protocol signing key.
+- Added `osciris-node inference readiness --work-root ... --profile ...` to
+  report the current provider/slot/verifier gap from the protocol store.
+- Daemon `status` now returns a real readiness snapshot instead of always
+  `null` when provider capability or peer-presence state exists locally.
+- Added a provider-side managed inference runtime path:
+  - operator can install the pinned Qwen GGUF artifact locally with hash
+    verification
+  - `inference serve` can launch `llama-server` directly instead of requiring a
+    separately supervised endpoint
+- Full CLI verification now passes after adding the missing `tempfile`
+  dependency to `osciris-cli` and refreshing `Cargo.lock`.
 - Still pending: a verified real multi-host prompt round trip with a remote
   provider/verifier quorum.
+- PR/release gate remains open:
+  - PR #16 is still draft by design because the multi-host acceptance boundary
+    is not yet satisfied.
+  - Release workflow and installer assets are ready, but a new tagged release
+    should wait until remote-provider evidence and the accountable-verification
+    claim are either implemented or explicitly narrowed.
 - Verification passed:
   - `cargo fmt --check`
+  - `cargo test -p osciris-node inference_readiness_counts_healthy_providers_slots_and_verifiers --locked -- --nocapture`
+  - `cargo test -p osciris-daemon status_reports_readiness_when_protocol_state_exists --locked -- --nocapture`
+  - `cargo check -p osciris-node -p osciris-daemon -p osciris-cli --locked`
   - `cargo test -p osciris-daemon network_start_records_identity_and_stop_resets_status --locked -- --nocapture`
   - `cargo test -p osciris-daemon submit_inference_rejects_invalid_desktop_inputs --locked -- --nocapture`
   - `cargo test --locked -p osciris-daemon`
+  - `cargo test --locked -p osciris-daemon -p osciris-node -p osciris-cli`
   - `cargo clippy -p osciris-daemon --locked --all-targets -- -D warnings`
   - `pnpm --dir apps/desktop build`
+
+## Public Desktop Release Readiness Review
+
+### Objective
+
+Determine whether the latest OSCIRIS desktop branch state is ready to be
+released publicly through GitHub as a coherent desktop beta, not just as a
+passing PR branch.
+
+### Checklist
+
+- [x] Review committed branch state and CI history
+- [x] Verify current local desktop/frontend build state
+- [x] Verify current local native desktop package build
+- [x] Verify current node/daemon test state
+- [x] Check live GitHub release and updater endpoints
+- [x] Check live OSCIRIS Labs beta manifest against the repo verifier
+- [x] Identify publication and code blockers
+
+### Review
+
+- PR `#16` on `codex/desktop-node-foundation` is still draft, but GitHub shows
+  `mergeStateStatus=CLEAN` and the committed branch tip passed both Desktop and
+  Release workflow matrices.
+- The current worktree contains additional uncommitted desktop/inference
+  changes beyond `2e4ca50 Add signed desktop self-updates`. Those changes are
+  not fully release-ready yet.
+- Local verification on the current worktree passed:
+  - `pnpm --dir apps/desktop build`
+  - `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  - `pnpm --dir apps/desktop tauri build`
+  - `cargo test --locked -p osciris-node -p osciris-daemon`
+- The produced macOS bundle is structurally correct for the tested host:
+  - app bundle contains `Contents/MacOS/osciris-daemon`
+  - app bundle contains `Resources/LICENSE` and `Resources/NOTICE`
+  - local `.dmg` built successfully
+- Full Rust verification on the current worktree failed:
+  - resolved by adding `tempfile.workspace = true` to
+    `crates/osciris-cli/Cargo.toml`
+  - `cargo test --locked -p osciris-daemon -p osciris-node -p osciris-cli`
+    now passes
+- Live publication state is behind the branch:
+  - `https://github.com/oscirisprotocol/core/releases/latest/download/latest.json`
+    returns `404`, so the desktop updater endpoint is not live
+  - `gh release view v0.1.1` shows CLI beta archives and
+    `beta-release-manifest.json`, but no desktop installer/update assets
+  - `https://oscirislabs.com/beta-release-manifest.json` still points to
+    `v0.1.0`, not `v0.1.1`
+  - `python3 scripts/verify_beta_release_surface.py --base-url https://oscirislabs.com`
+    currently fails because the public `v0.1.0` archives do not contain the
+    required `LICENSE` and `NOTICE` members
+- Documentation is partially stale relative to the code:
+  - `docs/milestones/provider_local_inference_roundtrip.md` has been updated to
+    reflect interactive inference progress
+  - `docs/desktop_product_workspace.md` now matches the implemented desktop
+    prompt transport boundary
+
+### Release Blockers
+
+- Publication blocker: publish a new tagged release containing the desktop
+  installer and signed updater assets so `latest.json` exists.
+- Publication blocker: republish the OSCIRIS Labs beta manifest to the new
+  release after GitHub assets are live and verified.
+- Documentation blocker: keep the desktop workflow docs aligned with the
+  implemented interactive inference surface and current beta boundary.
   - `pnpm --dir apps/desktop prepare:sidecar:debug`
   - `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
 
@@ -250,6 +359,12 @@ GitHub Actions and tagged GitHub Releases.
   separately from CLI binaries.
 - Tag/workflow-dispatch releases will include desktop installer artifacts in
   addition to existing CLI archives and manifest.
+- PR CI proved the release workflow can build:
+  - CLI archives for Linux, macOS arm64, and Windows x64
+  - desktop `.dmg`, `.deb`/`.AppImage`, and Windows installer artifacts
+  - updater manifest inputs for signed tag builds
+- Release publication is still unproven on the current branch because the
+  `Publish GitHub Release` job is skipped for non-tag PR runs by design.
 - Verified locally:
   - `.github/workflows/release.yml` parses as YAML
   - `pnpm --dir apps/desktop tauri build`

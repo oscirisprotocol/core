@@ -31,20 +31,22 @@ use osciris_core::{
     bundle_hash, inference_request_commitment, inference_response_commitment,
     load_signing_key_from_base64_seed, sha256_file, sign_inference_request,
     sign_inference_response, sign_job_announcement, sign_job_claim, sign_peer_presence,
-    sign_provider_capability, sign_receipt_availability, verify_inference_request_signature,
-    verify_inference_response_signature, verify_job_announcement_signature,
+    sign_provider_capability, sign_receipt_availability, sign_execution_receipt,
+    verify_inference_request_signature, verify_inference_response_signature, verify_job_announcement_signature,
     verify_job_assignment_signature, verify_job_claim_signature, verify_peer_presence_signature,
     verify_provider_capability_signature, verify_receipt_availability_signature,
     verify_verification_receipt_signature, verifying_key_from_base64, verifying_key_to_base64,
-    ExecutionReceipt, InferenceRequest, InferenceResponse, JobAnnouncement, JobAssignment,
-    JobClaim, NodeIdentity, NodeStatus, PeerPresence, ProviderCapability, ReceiptAvailability,
-    ReceiptBundle, VerificationReceipt, VerificationReceiptAnnouncement,
+    BundleIndex, ChainSubmissionStatus, CommandMetadata, ExecutionReceipt, ExecutionStatus,
+    InferenceRequest, InferenceResponse, JobAnnouncement, JobAssignment, JobClaim, JobSpec,
+    JobType, NodeIdentity, NodeStatus, PeerPresence, PrivacyMode, PrivacyPolicy, ProviderCapability,
+    ReceiptAvailability, ReceiptBundle, VerificationReceipt, VerificationReceiptAnnouncement,
 };
 use tar::{Archive, Builder};
+use tokio::process::{Child, Command};
 use tracing::{info, warn};
 
 use crate::store::ProtocolStore;
-use crate::{run_job, ProviderConfig};
+use crate::{collect_artifacts, gpu_metadata_from_environment, relative_to, run_job, ProviderConfig};
 
 const PRESENCE_TOPIC: &str = "osciris/network/presence";
 const CAPABILITY_TOPIC: &str = "osciris/network/capabilities";
@@ -55,6 +57,12 @@ const RECEIPT_AVAILABILITY_TOPIC: &str = "osciris/jobs/receipts";
 const VERIFICATION_RECEIPT_TOPIC: &str = "osciris/jobs/verifications";
 const BUNDLE_TRANSFER_PROTOCOL: &str = "/osciris/bundle-transfer/0.1.0";
 const INFERENCE_PROTOCOL: &str = "/osciris/inference/0.1.0";
+const PINNED_INFERENCE_PROFILE_ID: &str = "osciris-qwen3-4b-q4-v1";
+const PINNED_INFERENCE_MODEL_REVISION: &str = "bc640142c66e1fdd12af0bd68f40445458f3869b";
+const PINNED_INFERENCE_ARTIFACT_NAME: &str = "Qwen3-4B-Q4_K_M.gguf";
+const PINNED_INFERENCE_ARTIFACT_SHA256: &str =
+    "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5";
+const PINNED_INFERENCE_LICENSE: &str = "Apache-2.0";
 
 #[derive(Debug, Clone)]
 pub struct NetworkServeConfig {
@@ -136,6 +144,7 @@ pub struct AutoProviderConfig {
 pub struct InferenceServeConfig {
     pub protocol_root: PathBuf,
     pub signing_key_seed_base64: String,
+    pub signing_key_id: Option<String>,
     pub provider_id: String,
     pub profile_id: String,
     pub runtime: InferenceRuntimeConfig,
@@ -148,6 +157,13 @@ pub struct InferenceServeConfig {
 pub enum InferenceRuntimeConfig {
     Deterministic,
     LlamaCppServer { endpoint: String },
+    ManagedLlamaCpp {
+        llama_server_path: PathBuf,
+        model_path: PathBuf,
+        host: String,
+        port: u16,
+        ctx_size: u32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +177,7 @@ pub struct InferenceSubmitConfig {
 
 #[derive(Debug, Clone)]
 pub struct InferenceWaitConfig {
+    pub protocol_root: PathBuf,
     pub signing_key_seed_base64: String,
     pub request: InferenceRequest,
     pub provider_peer_id: String,
@@ -181,6 +198,19 @@ pub struct InferenceServeSummary {
 pub struct InferenceSubmitSummary {
     pub request: InferenceRequest,
     pub response: InferenceResponse,
+    pub evidence_dir: PathBuf,
+    pub execution_receipt_sha256: String,
+    pub bundle_sha256: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct InferenceProfileInstallSummary {
+    pub profile_id: String,
+    pub model_revision: String,
+    pub artifact_name: String,
+    pub artifact_sha256: String,
+    pub license: String,
+    pub installed_model_path: PathBuf,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -269,7 +299,7 @@ impl Default for InferenceCodec {
     fn default() -> Self {
         Self {
             request_size_maximum: 1024 * 1024,
-            response_size_maximum: 4 * 1024 * 1024,
+            response_size_maximum: 128 * 1024 * 1024,
         }
     }
 }
@@ -288,6 +318,14 @@ struct BundleTransferResponse {
     bundle_sha256: String,
     archive_tgz_base64: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct InferenceResponseEnvelope {
+    response: InferenceResponse,
+    provider_capability: ProviderCapability,
+    receipt_availability: ReceiptAvailability,
+    archive_tgz_base64: String,
 }
 
 #[async_trait]
@@ -353,7 +391,7 @@ impl RequestResponseCodec for BundleTransferCodec {
 impl RequestResponseCodec for InferenceCodec {
     type Protocol = StreamProtocol;
     type Request = InferenceRequest;
-    type Response = InferenceResponse;
+    type Response = InferenceResponseEnvelope;
 
     async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
     where
@@ -440,6 +478,8 @@ pub fn create_inference_request(config: &InferenceSubmitConfig) -> Result<Infere
 
 pub async fn serve_inference(config: &InferenceServeConfig) -> Result<InferenceServeSummary> {
     let signing_key = load_signing_key_from_base64_seed(&config.signing_key_seed_base64)?;
+    let store = ProtocolStore::open(&config.protocol_root).await?;
+    let _managed_runtime = start_managed_inference_runtime_if_needed(config).await?;
     let mut swarm = build_network_swarm(&signing_key)?;
     let listen_addr: Multiaddr = config.listen_addr.parse()?;
     swarm.listen_on(listen_addr)?;
@@ -467,10 +507,16 @@ pub async fn serve_inference(config: &InferenceServeConfig) -> Result<InferenceS
                             ..
                         },
                     )) => {
-                        let response = build_inference_response(&request, config, &signing_key).await;
+                        let response = build_inference_response_envelope(
+                            &store,
+                            &request,
+                            config,
+                            &signing_key,
+                        )
+                        .await;
                         match response {
                             Ok(response) => {
-                                request_ids.push(response.request_id);
+                                request_ids.push(response.response.request_id);
                                 served_request_count += 1;
                                 if let Err(_response) = swarm.behaviour_mut().inference.send_response(channel, response) {
                                     warn!("failed to send inference response to {peer}");
@@ -540,17 +586,40 @@ pub async fn wait_for_inference_response(
                             RequestResponseEvent::Message { message, .. } => {
                                 if let RequestResponseMessage::Response { request_id, response } = message {
                                     if Some(request_id) == pending_request_id {
-                                        let provider_key = verifying_key_from_base64(&response.provider_ed25519_public_key_base64)?;
-                                        verify_inference_response_signature(&response, &provider_key)?;
-                                        if response.request_id != config.request.request_id {
+                                        let provider_key = verifying_key_from_base64(
+                                            &response.response.provider_ed25519_public_key_base64
+                                        )?;
+                                        verify_inference_response_signature(&response.response, &provider_key)?;
+                                        if response.response.request_id != config.request.request_id {
                                             bail!("inference response request_id did not match request");
                                         }
-                                        if response.request_sha256 != config.request.request_sha256 {
+                                        if response.response.request_sha256 != config.request.request_sha256 {
                                             bail!("inference response request commitment did not match request");
                                         }
+                                        verify_receipt_availability(&response.receipt_availability)?;
+                                        if response.receipt_availability.job_id
+                                            != response.response.request_id
+                                        {
+                                            bail!("receipt availability job_id did not match inference request_id");
+                                        }
+                                        if response.receipt_availability.provider_node_id
+                                            != response.response.provider_node_id
+                                        {
+                                            bail!("receipt availability provider did not match inference response provider");
+                                        }
+                                        let fetched = store_inference_response_evidence(
+                                            &config.protocol_root,
+                                            &response.provider_capability,
+                                            &response.receipt_availability,
+                                            &response.archive_tgz_base64,
+                                        )
+                                        .await?;
                                         return Ok(InferenceSubmitSummary {
                                             request: config.request.clone(),
-                                            response,
+                                            response: response.response,
+                                            evidence_dir: fetched.evidence_dir,
+                                            execution_receipt_sha256: fetched.execution_receipt_sha256,
+                                            bundle_sha256: fetched.bundle_sha256,
                                         });
                                     }
                                 }
@@ -577,6 +646,113 @@ pub async fn wait_for_inference_response(
                 }
             }
         }
+    }
+}
+
+pub fn pinned_inference_profile_dir(protocol_root: &Path) -> PathBuf {
+    protocol_root.join("profiles").join(PINNED_INFERENCE_PROFILE_ID)
+}
+
+pub fn pinned_inference_model_path(protocol_root: &Path) -> PathBuf {
+    pinned_inference_profile_dir(protocol_root).join(PINNED_INFERENCE_ARTIFACT_NAME)
+}
+
+pub fn install_pinned_inference_profile(
+    protocol_root: &Path,
+    source_model_path: &Path,
+) -> Result<InferenceProfileInstallSummary> {
+    if !source_model_path.exists() {
+        bail!(
+            "pinned profile source model does not exist: {}",
+            source_model_path.display()
+        );
+    }
+    let actual_sha256 = sha256_file(source_model_path)?;
+    if actual_sha256 != PINNED_INFERENCE_ARTIFACT_SHA256 {
+        bail!(
+            "pinned profile artifact SHA-256 mismatch: expected {}, got {}",
+            PINNED_INFERENCE_ARTIFACT_SHA256,
+            actual_sha256
+        );
+    }
+    let profile_dir = pinned_inference_profile_dir(protocol_root);
+    fs::create_dir_all(&profile_dir)
+        .with_context(|| format!("create profile dir {}", profile_dir.display()))?;
+    let installed_model_path = pinned_inference_model_path(protocol_root);
+    fs::copy(source_model_path, &installed_model_path).with_context(|| {
+        format!(
+            "copy pinned profile model from {} to {}",
+            source_model_path.display(),
+            installed_model_path.display()
+        )
+    })?;
+    Ok(InferenceProfileInstallSummary {
+        profile_id: PINNED_INFERENCE_PROFILE_ID.to_string(),
+        model_revision: PINNED_INFERENCE_MODEL_REVISION.to_string(),
+        artifact_name: PINNED_INFERENCE_ARTIFACT_NAME.to_string(),
+        artifact_sha256: PINNED_INFERENCE_ARTIFACT_SHA256.to_string(),
+        license: PINNED_INFERENCE_LICENSE.to_string(),
+        installed_model_path,
+    })
+}
+
+async fn start_managed_inference_runtime_if_needed(
+    config: &InferenceServeConfig,
+) -> Result<Option<ManagedInferenceRuntime>> {
+    match &config.runtime {
+        InferenceRuntimeConfig::ManagedLlamaCpp {
+            llama_server_path,
+            model_path,
+            host,
+            port,
+            ctx_size,
+        } => {
+            let child = Command::new(llama_server_path)
+                .arg("--model")
+                .arg(model_path)
+                .arg("--host")
+                .arg(host)
+                .arg("--port")
+                .arg(port.to_string())
+                .arg("--ctx-size")
+                .arg(ctx_size.to_string())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .with_context(|| {
+                    format!(
+                        "start managed llama-server {} with model {}",
+                        llama_server_path.display(),
+                        model_path.display()
+                    )
+                })?;
+            let endpoint = format!("http://{}:{}", host, port);
+            wait_for_llama_cpp_ready(&endpoint).await?;
+            Ok(Some(ManagedInferenceRuntime { child }))
+        }
+        _ => Ok(None),
+    }
+}
+
+async fn wait_for_llama_cpp_ready(endpoint: &str) -> Result<()> {
+    let client = reqwest::Client::new();
+    let health_url = format!("{}/health", endpoint.trim_end_matches('/'));
+    for _ in 0..50 {
+        match client.get(&health_url).send().await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            _ => tokio::time::sleep(Duration::from_millis(200)).await,
+        }
+    }
+    bail!("managed llama.cpp runtime did not become ready at {endpoint}");
+}
+
+struct ManagedInferenceRuntime {
+    child: Child,
+}
+
+impl Drop for ManagedInferenceRuntime {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
     }
 }
 
@@ -608,6 +784,9 @@ async fn build_inference_response(
         InferenceRuntimeConfig::LlamaCppServer { endpoint } => {
             llama_cpp_completion(endpoint, request).await?
         }
+        InferenceRuntimeConfig::ManagedLlamaCpp { host, port, .. } => {
+            llama_cpp_completion(&format!("http://{}:{}", host, port), request).await?
+        }
     };
     let mut response = InferenceResponse {
         request_id: request.request_id,
@@ -626,6 +805,313 @@ async fn build_inference_response(
     response.output_tokens = rough_token_count(&response.response_text);
     response.signature = sign_inference_response(&response, signing_key)?;
     Ok(response)
+}
+
+async fn build_inference_response_envelope(
+    store: &ProtocolStore,
+    request: &InferenceRequest,
+    config: &InferenceServeConfig,
+    signing_key: &ed25519_dalek::SigningKey,
+) -> Result<InferenceResponseEnvelope> {
+    let response = build_inference_response(request, config, signing_key).await?;
+    let evidence_dir = write_inference_evidence(store, request, &response, config, signing_key).await?;
+    let provider_capability = if let Some(capability) =
+        store.load_provider_capability(&config.provider_id).await?
+    {
+        capability
+    } else {
+        let mut capability = default_inference_provider_capability(config, &response);
+        capability.signature = sign_provider_capability(&capability, signing_key)?;
+        store.record_provider_capability(&capability).await?;
+        capability
+    };
+    let identity = NodeIdentity {
+        node_id: config.provider_id.clone(),
+        role: osciris_core::NodeRole::Provider,
+        ed25519_public_key_base64: response.provider_ed25519_public_key_base64.clone(),
+        evm_address: None,
+        display_name: config.provider_id.clone(),
+        bootstrap_peers: config.bootstrap_peers.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let availability = create_receipt_availability_from_evidence(&evidence_dir, &identity, signing_key)?;
+    store.record_receipt_bundle(
+        &serde_json::from_slice::<ReceiptBundle>(
+            &fs::read(evidence_dir.join("receipt_bundle.json"))
+                .with_context(|| format!("failed to read {}", evidence_dir.join("receipt_bundle.json").display()))?,
+        )?,
+    ).await?;
+    let archive_bytes = archive_evidence_dir(&evidence_dir)?;
+    Ok(InferenceResponseEnvelope {
+        response,
+        provider_capability,
+        receipt_availability: availability,
+        archive_tgz_base64: BASE64.encode(archive_bytes),
+    })
+}
+
+fn default_inference_provider_capability(
+    config: &InferenceServeConfig,
+    response: &InferenceResponse,
+) -> ProviderCapability {
+    let runtime = match &config.runtime {
+        InferenceRuntimeConfig::Deterministic => "deterministic",
+        InferenceRuntimeConfig::LlamaCppServer { .. } => "llama-cpp",
+        InferenceRuntimeConfig::ManagedLlamaCpp { .. } => "llama-cpp",
+    };
+    let mut capability = ProviderCapability {
+        node_id: config.provider_id.clone(),
+        ed25519_public_key_base64: response.provider_ed25519_public_key_base64.clone(),
+        host_class: "interactive-inference".to_string(),
+        gpu_model: std::env::var("OSCIRIS_GPU_MODEL").unwrap_or_else(|_| "unknown".to_string()),
+        gpu_count: std::env::var("OSCIRIS_GPU_COUNT")
+            .ok()
+            .and_then(|raw| raw.parse::<u32>().ok())
+            .unwrap_or(0),
+        vram_gb: std::env::var("OSCIRIS_GPU_VRAM_GB")
+            .ok()
+            .and_then(|raw| raw.parse::<f64>().ok())
+            .unwrap_or(0.0),
+        cuda_available: std::env::var("OSCIRIS_CUDA_AVAILABLE")
+            .map(|raw| matches!(raw.as_str(), "1" | "true" | "TRUE"))
+            .unwrap_or(false),
+        mps_available: std::env::var("OSCIRIS_MPS_AVAILABLE")
+            .map(|raw| matches!(raw.as_str(), "1" | "true" | "TRUE"))
+            .unwrap_or(false),
+        supported_job_types: vec![JobType::InferenceEconomics],
+        supported_runtimes: vec![runtime.to_string()],
+        pricing_hint: None,
+        current_load: 0.0,
+        active_job_count: 1,
+        status: NodeStatus::OnlineBusy,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        signature: String::new(),
+    };
+    if capability.gpu_count == 0 {
+        capability.gpu_model = "none".to_string();
+    }
+    capability
+}
+
+async fn write_inference_evidence(
+    store: &ProtocolStore,
+    request: &InferenceRequest,
+    response: &InferenceResponse,
+    config: &InferenceServeConfig,
+    signing_key: &ed25519_dalek::SigningKey,
+) -> Result<PathBuf> {
+    let evidence_dir = config
+        .protocol_root
+        .join("evidence")
+        .join(request.request_id.to_string());
+    fs::create_dir_all(&evidence_dir)?;
+    let metrics_dir = evidence_dir.join("python-output");
+    fs::create_dir_all(&metrics_dir)?;
+
+    let job_spec = JobSpec {
+        job_id: request.request_id,
+        job_type: JobType::InferenceEconomics,
+        dataset: Some("interactive_inference_prompt".to_string()),
+        model_id: Some(request.profile_id.clone()),
+        command: match &config.runtime {
+            InferenceRuntimeConfig::Deterministic => "osciris-node inference serve --runtime deterministic".to_string(),
+            InferenceRuntimeConfig::LlamaCppServer { endpoint } => format!(
+                "osciris-node inference serve --runtime llama-cpp --llama-cpp-endpoint {endpoint}"
+            ),
+            InferenceRuntimeConfig::ManagedLlamaCpp {
+                llama_server_path,
+                model_path,
+                host,
+                port,
+                ctx_size,
+            } => format!(
+                "osciris-node inference serve --runtime llama-cpp-managed --llama-server-path {} --model-path {} --managed-llama-host {} --managed-llama-port {} --managed-llama-ctx-size {}",
+                llama_server_path.display(),
+                model_path.display(),
+                host,
+                port,
+                ctx_size
+            ),
+        },
+        args: vec![],
+        privacy_policy: PrivacyPolicy {
+            privacy_mode: PrivacyMode::RawBaseline,
+            release_object: "interactive_inference_response".to_string(),
+            formal_dp_claim: false,
+            sensitive_field_policy: "prompt_and_response_private_to_peer_transport".to_string(),
+            evidence_profile: "interactive_inference_transport".to_string(),
+        },
+        required_verifier_count: 2,
+        challenge_window_seconds: 3600,
+        payment_token: "USDC_TEST".to_string(),
+        escrow_amount_atomic: "0".to_string(),
+        created_at: request.created_at.clone(),
+    };
+    store
+        .upsert_job_spec(&job_spec, "completed", Some(&evidence_dir), Some("python-output/inference_economics.json"))
+        .await?;
+
+    let job_spec_path = evidence_dir.join("job_spec.json");
+    let stdout_path = evidence_dir.join("stdout.log");
+    let stderr_path = evidence_dir.join("stderr.log");
+    let command_path = evidence_dir.join("command.json");
+    let execution_receipt_path = evidence_dir.join("execution_receipt.json");
+    let receipt_bundle_path = evidence_dir.join("receipt_bundle.json");
+    let bundle_index_path = evidence_dir.join("bundle_index.json");
+    let request_path = evidence_dir.join("inference_request.json");
+    let response_path = evidence_dir.join("inference_response.json");
+    let metrics_path = metrics_dir.join("inference_economics.json");
+
+    fs::write(&job_spec_path, serde_json::to_vec_pretty(&job_spec)?)?;
+    fs::write(&request_path, serde_json::to_vec_pretty(request)?)?;
+    fs::write(&response_path, serde_json::to_vec_pretty(response)?)?;
+    fs::write(
+        &stdout_path,
+        format!("{}\n", response.response_text),
+    )
+    ?;
+    fs::write(&stderr_path, b"")?;
+    let command_metadata = CommandMetadata {
+        command: job_spec.command.clone(),
+        argv: vec![job_spec.command.clone()],
+        working_directory: config.protocol_root.display().to_string(),
+        started_at: request.created_at.clone(),
+        finished_at: response.created_at.clone(),
+        exit_code: 0,
+    };
+    fs::write(&command_path, serde_json::to_vec_pretty(&command_metadata)?)?;
+    fs::write(
+        &metrics_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "kind": "inference_economics_benchmark",
+            "config": {
+                "model": request.profile_id,
+                "provider_id": response.provider_node_id,
+                "mode": "interactive_peer_inference"
+            },
+            "aggregate": {
+                "latency_ms": response.latency_ms,
+                "prompt_tokens": response.prompt_tokens,
+                "output_tokens": response.output_tokens
+            },
+            "runs": [{
+                "request_id": request.request_id,
+                "request_sha256": request.request_sha256,
+                "response_sha256": response.response_sha256,
+                "latency_ms": response.latency_ms,
+                "prompt_tokens": response.prompt_tokens,
+                "output_tokens": response.output_tokens
+            }]
+        }))?,
+    )
+    ?;
+
+    let artifact_manifests = collect_artifacts(
+        &evidence_dir,
+        &[
+            job_spec_path.clone(),
+            command_path.clone(),
+            stdout_path.clone(),
+            stderr_path.clone(),
+            request_path.clone(),
+            response_path.clone(),
+        ],
+    )?;
+    let artifact_root_sha256 = osciris_core::canonical_json_sha256(&artifact_manifests)?;
+    let signing_key_id = config
+        .signing_key_id
+        .clone()
+        .unwrap_or_else(|| format!("{}-inference-key", config.provider_id));
+    let mut receipt = ExecutionReceipt {
+        receipt_id: uuid::Uuid::now_v7(),
+        job_id: request.request_id,
+        provider_id: config.provider_id.clone(),
+        job_type: JobType::InferenceEconomics,
+        status: ExecutionStatus::Completed,
+        command_exit_code: 0,
+        started_at: request.created_at.clone(),
+        finished_at: response.created_at.clone(),
+        wall_clock_seconds: response.latency_ms as f64 / 1000.0,
+        stdout_sha256: sha256_file(&stdout_path)?,
+        stderr_sha256: sha256_file(&stderr_path)?,
+        artifact_root_sha256,
+        artifact_manifests,
+        metrics_path: relative_to(&metrics_path, &evidence_dir)?,
+        gpu_metadata: gpu_metadata_from_environment(),
+        signature: String::new(),
+        signing_key_id,
+    };
+    receipt.signature = sign_execution_receipt(&receipt, signing_key)?;
+    fs::write(&execution_receipt_path, serde_json::to_vec_pretty(&receipt)?)?;
+    store
+        .record_execution_receipt(&receipt, &evidence_dir, &receipt.metrics_path)
+        .await?;
+
+    let bundle_index = BundleIndex {
+        job_id: request.request_id,
+        artifacts: receipt.artifact_manifests.clone(),
+        execution_receipt_path: "execution_receipt.json".to_string(),
+        verification_receipt_paths: vec![],
+    };
+    fs::write(&bundle_index_path, serde_json::to_vec_pretty(&bundle_index)?)?;
+    let mut bundle = ReceiptBundle {
+        bundle_id: uuid::Uuid::now_v7(),
+        job_id: request.request_id,
+        job_spec_sha256: sha256_file(&job_spec_path)?,
+        execution_receipt_sha256: sha256_file(&execution_receipt_path)?,
+        verification_receipt_sha256_list: vec![],
+        bundle_sha256: String::new(),
+        artifact_index_path: "bundle_index.json".to_string(),
+        chain_submission_status: ChainSubmissionStatus::Pending,
+    };
+    bundle.bundle_sha256 = bundle_hash(&bundle)?;
+    fs::write(&receipt_bundle_path, serde_json::to_vec_pretty(&bundle)?)?;
+    store.record_receipt_bundle(&bundle).await?;
+    Ok(evidence_dir)
+}
+
+async fn store_inference_response_evidence(
+    protocol_root: &Path,
+    provider_capability: &ProviderCapability,
+    availability: &ReceiptAvailability,
+    archive_tgz_base64: &str,
+) -> Result<FetchedBundle> {
+    let store = ProtocolStore::open(protocol_root).await?;
+    verify_and_store_capability(&store, provider_capability.clone()).await?;
+    let archive_bytes = BASE64.decode(archive_tgz_base64)?;
+    let evidence_dir = protocol_root
+        .join("evidence")
+        .join(availability.job_id.to_string());
+    unpack_evidence_archive(&archive_bytes, &evidence_dir)?;
+    let bundle = validate_fetched_evidence(&evidence_dir, availability)?;
+    store.record_receipt_bundle(&bundle).await?;
+    let execution_receipt: ExecutionReceipt = serde_json::from_slice(
+        &fs::read(evidence_dir.join("execution_receipt.json"))
+            .with_context(|| format!("failed to read {}", evidence_dir.join("execution_receipt.json").display()))?,
+    )?;
+    let job_spec: JobSpec = serde_json::from_slice(
+        &fs::read(evidence_dir.join("job_spec.json"))
+            .with_context(|| format!("failed to read {}", evidence_dir.join("job_spec.json").display()))?,
+    )?;
+    store
+        .upsert_job_spec(
+            &job_spec,
+            "completed",
+            Some(&evidence_dir),
+            Some(&execution_receipt.metrics_path),
+        )
+        .await?;
+    store
+        .record_execution_receipt(&execution_receipt, &evidence_dir, &execution_receipt.metrics_path)
+        .await?;
+    Ok(FetchedBundle {
+        job_id: availability.job_id,
+        provider_node_id: availability.provider_node_id.clone(),
+        provider_ed25519_public_key_base64: availability.provider_ed25519_public_key_base64.clone(),
+        evidence_dir,
+        execution_receipt_sha256: availability.execution_receipt_sha256.clone(),
+        bundle_sha256: availability.bundle_sha256.clone(),
+    })
 }
 
 fn deterministic_inference_response(request: &InferenceRequest) -> String {
@@ -2575,6 +3061,7 @@ mod tests {
         load_signing_key_from_base64_seed, verifying_key_to_base64, JobType, PrivacyMode,
         PrivacyPolicy,
     };
+    use osciris_verifier::{verify_bundle, VerifierConfig};
 
     fn announcement(required_capability: &str) -> JobAnnouncement {
         let job_spec = osciris_core::JobSpec {
@@ -2653,6 +3140,27 @@ mod tests {
         verifying_key_to_base64(&signing_key.verifying_key())
     }
 
+    fn start_llama_cpp_test_server(response_body: String) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+        format!("http://{}", addr)
+    }
+
     #[tokio::test]
     async fn inference_request_response_signatures_verify() {
         let requester_seed = BASE64.encode([21_u8; 32]);
@@ -2671,6 +3179,7 @@ mod tests {
             &InferenceServeConfig {
                 protocol_root: PathBuf::from("/tmp/unused"),
                 signing_key_seed_base64: provider_seed,
+                signing_key_id: None,
                 provider_id: "provider-1".to_string(),
                 profile_id: "osciris-test-profile".to_string(),
                 runtime: InferenceRuntimeConfig::Deterministic,
@@ -2685,6 +3194,243 @@ mod tests {
         assert_eq!(response.request_id, request.request_id);
         assert_eq!(response.request_sha256, request.request_sha256);
         verify_inference_response_signature(&response, &provider_key.verifying_key()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn inference_llama_cpp_runtime_signs_endpoint_response() {
+        let requester_seed = BASE64.encode([23_u8; 32]);
+        let provider_seed = BASE64.encode([24_u8; 32]);
+        let endpoint = start_llama_cpp_test_server(
+            serde_json::json!({
+                "content": "llama-cpp-smoke: empty input raises IndexError."
+            })
+            .to_string(),
+        );
+        let request = create_inference_request(&InferenceSubmitConfig {
+            signing_key_seed_base64: requester_seed,
+            requester_id: "developer-llama".to_string(),
+            profile_id: "osciris-test-profile".to_string(),
+            prompt: "Explain a public function.".to_string(),
+            max_output_tokens: 64,
+        })
+        .unwrap();
+        let provider_key = load_signing_key_from_base64_seed(&provider_seed).unwrap();
+        let response = build_inference_response(
+            &request,
+            &InferenceServeConfig {
+                protocol_root: PathBuf::from("/tmp/unused"),
+                signing_key_seed_base64: provider_seed,
+                signing_key_id: None,
+                provider_id: "provider-llama".to_string(),
+                profile_id: "osciris-test-profile".to_string(),
+                runtime: InferenceRuntimeConfig::LlamaCppServer { endpoint },
+                listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
+                bootstrap_peers: vec![],
+                run_for: Duration::from_secs(1),
+            },
+            &provider_key,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.response_text,
+            "llama-cpp-smoke: empty input raises IndexError."
+        );
+        assert_eq!(response.request_id, request.request_id);
+        assert_eq!(response.request_sha256, request.request_sha256);
+        verify_inference_response_signature(&response, &provider_key.verifying_key()).unwrap();
+    }
+
+    #[test]
+    fn pinned_profile_install_rejects_hash_mismatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("wrong.gguf");
+        std::fs::write(&source, b"not-the-pinned-model").unwrap();
+        let error = install_pinned_inference_profile(temp.path(), &source).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("pinned profile artifact SHA-256 mismatch"));
+    }
+
+    #[tokio::test]
+    async fn managed_llama_runtime_uses_local_endpoint() {
+        let endpoint = start_llama_cpp_test_server(
+            serde_json::json!({
+                "content": "managed-llama-smoke: verified local runtime launch path."
+            })
+            .to_string(),
+        );
+        let url = reqwest::Url::parse(&endpoint).unwrap();
+        let requester_seed = BASE64.encode([27_u8; 32]);
+        let provider_seed = BASE64.encode([28_u8; 32]);
+        let request = create_inference_request(&InferenceSubmitConfig {
+            signing_key_seed_base64: requester_seed,
+            requester_id: "developer-managed".to_string(),
+            profile_id: "osciris-test-profile".to_string(),
+            prompt: "Explain a public function.".to_string(),
+            max_output_tokens: 64,
+        })
+        .unwrap();
+        let provider_key = load_signing_key_from_base64_seed(&provider_seed).unwrap();
+        let response = build_inference_response(
+            &request,
+            &InferenceServeConfig {
+                protocol_root: PathBuf::from("/tmp/unused"),
+                signing_key_seed_base64: provider_seed,
+                signing_key_id: None,
+                provider_id: "provider-managed".to_string(),
+                profile_id: "osciris-test-profile".to_string(),
+                runtime: InferenceRuntimeConfig::ManagedLlamaCpp {
+                    llama_server_path: PathBuf::from("/usr/bin/llama-server"),
+                    model_path: PathBuf::from("/models/Qwen3-4B-Q4_K_M.gguf"),
+                    host: url.host_str().unwrap().to_string(),
+                    port: url.port().unwrap(),
+                    ctx_size: 8192,
+                },
+                listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
+                bootstrap_peers: vec![],
+                run_for: Duration::from_secs(1),
+            },
+            &provider_key,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.response_text,
+            "managed-llama-smoke: verified local runtime launch path."
+        );
+    }
+
+    #[tokio::test]
+    async fn inference_submit_round_trip_stores_verifier_ready_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider_seed = BASE64.encode([25_u8; 32]);
+        let requester_seed = BASE64.encode([26_u8; 32]);
+        let provider_peer_id = peer_id_from_signing_seed(&provider_seed).unwrap();
+        let provider_root = temp.path().join("provider");
+        let requester_root = temp.path().join("requester");
+        std::fs::create_dir_all(provider_root.join(".osciris")).unwrap();
+        std::fs::create_dir_all(requester_root.join(".osciris")).unwrap();
+
+        let serve = tokio::spawn({
+            let provider_root = provider_root.clone();
+            let provider_seed = provider_seed.clone();
+            async move {
+                serve_inference(&InferenceServeConfig {
+                    protocol_root: provider_root.join(".osciris"),
+                    signing_key_seed_base64: provider_seed,
+                    signing_key_id: Some("provider-inference-key".to_string()),
+                    provider_id: "provider-roundtrip".to_string(),
+                    profile_id: "osciris-test-profile".to_string(),
+                    runtime: InferenceRuntimeConfig::Deterministic,
+                    listen_addr: "/ip4/127.0.0.1/tcp/48201".to_string(),
+                    bootstrap_peers: vec![],
+                    run_for: Duration::from_secs(10),
+                })
+                .await
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let request = create_inference_request(&InferenceSubmitConfig {
+            signing_key_seed_base64: requester_seed.clone(),
+            requester_id: "requester-roundtrip".to_string(),
+            profile_id: "osciris-test-profile".to_string(),
+            prompt: "Explain this public function.".to_string(),
+            max_output_tokens: 32,
+        })
+        .unwrap();
+        let summary = wait_for_inference_response(&InferenceWaitConfig {
+            protocol_root: requester_root.join(".osciris"),
+            signing_key_seed_base64: requester_seed,
+            request,
+            provider_peer_id: provider_peer_id.clone(),
+            listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
+            bootstrap_peers: vec![format!("/ip4/127.0.0.1/tcp/48201/p2p/{provider_peer_id}")],
+            timeout: Duration::from_secs(10),
+        })
+        .await
+        .unwrap();
+
+        let serve_summary = serve.await.unwrap().unwrap();
+        assert_eq!(serve_summary.served_request_count, 1);
+        assert!(summary.evidence_dir.join("execution_receipt.json").exists());
+        assert!(summary.evidence_dir.join("receipt_bundle.json").exists());
+        assert!(summary.evidence_dir.join("bundle_index.json").exists());
+        assert!(summary.evidence_dir.join("python-output/inference_economics.json").exists());
+        assert_eq!(summary.response.provider_node_id, "provider-roundtrip");
+        assert!(!summary.execution_receipt_sha256.is_empty());
+        assert!(!summary.bundle_sha256.is_empty());
+    }
+
+    #[tokio::test]
+    async fn interactive_inference_evidence_verifies_locally() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider_seed = BASE64.encode([27_u8; 32]);
+        let requester_seed = BASE64.encode([28_u8; 32]);
+        let verifier_seed = BASE64.encode([29_u8; 32]);
+        let provider_peer_id = peer_id_from_signing_seed(&provider_seed).unwrap();
+        let provider_key = load_signing_key_from_base64_seed(&provider_seed).unwrap();
+        let provider_public_key = verifying_key_to_base64(&provider_key.verifying_key());
+        let provider_root = temp.path().join("provider");
+        let requester_root = temp.path().join("requester");
+        std::fs::create_dir_all(provider_root.join(".osciris")).unwrap();
+        std::fs::create_dir_all(requester_root.join(".osciris")).unwrap();
+
+        let serve = tokio::spawn({
+            let provider_root = provider_root.clone();
+            let provider_seed = provider_seed.clone();
+            async move {
+                serve_inference(&InferenceServeConfig {
+                    protocol_root: provider_root.join(".osciris"),
+                    signing_key_seed_base64: provider_seed,
+                    signing_key_id: Some("provider-inference-key".to_string()),
+                    provider_id: "provider-verify".to_string(),
+                    profile_id: "osciris-test-profile".to_string(),
+                    runtime: InferenceRuntimeConfig::Deterministic,
+                    listen_addr: "/ip4/127.0.0.1/tcp/48202".to_string(),
+                    bootstrap_peers: vec![],
+                    run_for: Duration::from_secs(10),
+                })
+                .await
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let request = create_inference_request(&InferenceSubmitConfig {
+            signing_key_seed_base64: requester_seed.clone(),
+            requester_id: "requester-verify".to_string(),
+            profile_id: "osciris-test-profile".to_string(),
+            prompt: "Explain this public function.".to_string(),
+            max_output_tokens: 32,
+        })
+        .unwrap();
+        let summary = wait_for_inference_response(&InferenceWaitConfig {
+            protocol_root: requester_root.join(".osciris"),
+            signing_key_seed_base64: requester_seed,
+            request,
+            provider_peer_id: provider_peer_id.clone(),
+            listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
+            bootstrap_peers: vec![format!("/ip4/127.0.0.1/tcp/48202/p2p/{provider_peer_id}")],
+            timeout: Duration::from_secs(10),
+        })
+        .await
+        .unwrap();
+
+        let serve_summary = serve.await.unwrap().unwrap();
+        assert_eq!(serve_summary.served_request_count, 1);
+
+        let verifier = VerifierConfig {
+            verifier_id: "verifier-a".to_string(),
+            signing_key_id: "verifier-a-key".to_string(),
+            signing_key_seed_base64: verifier_seed,
+        };
+        let verify_output = verify_bundle(&summary.evidence_dir, &provider_public_key, &verifier)
+            .await
+            .unwrap();
+        assert!(verify_output.verification_receipt_path.exists());
     }
 
     #[test]
