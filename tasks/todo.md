@@ -156,6 +156,49 @@ OSCIRIS peer transport.
   - `pnpm --dir apps/desktop prepare:sidecar:debug`
   - `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
 
+## Desktop Installer Release Artifacts
+
+### Objective
+
+Publish usable desktop installer artifacts alongside the existing CLI release
+archives so testers can download macOS, Linux, and Windows desktop builds from
+GitHub Actions and tagged GitHub Releases.
+
+### Spec
+
+- Keep the existing CLI binary release artifacts intact.
+- Add release workflow packaging for the Tauri desktop app.
+- Upload platform installer artifacts from Release workflow runs:
+  - macOS `.dmg`
+  - Linux `.deb` and `.AppImage` where Tauri emits them
+  - Windows `.msi` and `.exe` where Tauri emits them
+- Include desktop installer artifacts in tag/workflow-dispatch GitHub releases.
+- Verify workflow YAML and at least one local platform bundle.
+
+### Checklist
+
+- [x] Inspect current published release and workflow artifact state
+- [x] Add desktop installer matrix to Release workflow
+- [x] Include installer globs in release publishing
+- [x] Verify workflow YAML parses
+- [x] Verify local macOS Tauri build emits a DMG
+
+### Review
+
+- Latest published release `v0.1.1` only included CLI archive assets, not
+  desktop installers.
+- Release workflow now has a `desktop-installers` matrix for macOS, Linux, and
+  Windows.
+- Branch and PR Release workflow runs will upload desktop installer artifacts
+  separately from CLI binaries.
+- Tag/workflow-dispatch releases will include desktop installer artifacts in
+  addition to existing CLI archives and manifest.
+- Verified locally:
+  - `.github/workflows/release.yml` parses as YAML
+  - `pnpm --dir apps/desktop tauri build`
+  - local macOS bundle emitted
+    `apps/desktop/src-tauri/target/release/bundle/dmg/OSCIRIS Node_0.1.1_aarch64.dmg`
+
 ## Desktop Execution and Verification Completion
 
 ### Objective
