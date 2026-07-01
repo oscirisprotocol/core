@@ -61,6 +61,11 @@ export interface CreateJobInput {
   budget_usdc_micros: number;
 }
 
+export interface EvidenceIngestionInput {
+  job_id: string;
+  evidence_dir: string;
+}
+
 export interface JobEvidenceSummary {
   execution_receipt_sha256: string | null;
   verification_status: string | null;
@@ -160,6 +165,12 @@ export function publishJob(jobId: string): Promise<DesktopJob> {
 
 export function refreshProtocolJobs(): Promise<WorkspaceSnapshot> {
   return invoke<WorkspaceSnapshot>("refresh_protocol_jobs");
+}
+
+export function ingestEvidence(
+  input: EvidenceIngestionInput,
+): Promise<WorkspaceSnapshot> {
+  return invoke<WorkspaceSnapshot>("ingest_evidence", { input });
 }
 
 export function configureWallet(

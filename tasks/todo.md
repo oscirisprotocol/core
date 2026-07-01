@@ -1,5 +1,49 @@
 # Task Plan
 
+## Desktop Evidence Ingestion Bridge
+
+### Objective
+
+Expose provider evidence ingestion through the daemon so the desktop can import
+verified local evidence into the daemon-owned protocol store and refresh job
+status without shelling out to the CLI.
+
+### Spec
+
+- Add a daemon command accepting `job_id` and a local evidence directory.
+- Require an existing signed receipt availability record for that job/provider.
+- Validate `job_spec.json`, `execution_receipt.json`, and
+  `receipt_bundle.json` against the signed availability before mutating state.
+- Verify the provider execution receipt signature.
+- Record the job spec, execution receipt, and receipt bundle in the daemon
+  protocol store.
+- Refresh the desktop job state from protocol records after ingestion.
+
+### Checklist
+
+- [x] Implement daemon ingestion validation and storage
+- [x] Add daemon client/Tauri/TypeScript bindings
+- [x] Add regression coverage for evidence ingestion
+- [x] Run targeted daemon verification and desktop build checks
+- [x] Commit and push
+
+### Review
+
+- Added daemon `IngestEvidence` handling that opens the daemon-owned protocol
+  store, requires a signed receipt availability record, validates local
+  evidence files, records job spec/execution receipt/receipt bundle, and then
+  refreshes desktop protocol state.
+- Added daemon client, Tauri, and TypeScript wrappers for evidence ingestion.
+- Added regression coverage that runs a real signed provider job, records
+  signed availability, ingests evidence through the daemon, and verifies the
+  desktop job moves to `verifying` with receipt hashes populated.
+- Verification passed:
+  - `cargo test -p osciris-daemon ingest_evidence_records_receipt_and_refreshes_job --locked -- --nocapture`
+  - `cargo test -p osciris-daemon --locked`
+  - `cargo clippy -p osciris-daemon --locked --all-targets -- -D warnings`
+  - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop tauri build`
+
 ## Desktop Protocol Status Sync
 
 ### Objective

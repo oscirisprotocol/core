@@ -1,5 +1,5 @@
 use std::{
-    env, fmt,
+    env, fmt, fs,
     io::Write,
     path::{Path, PathBuf},
     str::FromStr,
@@ -30,8 +30,10 @@ use tokio::{
 use tokio_util::codec::{Framed, LinesCodec};
 
 use osciris_core::{
-    load_signing_key_from_base64_seed, sign_job_announcement, verifying_key_to_base64,
-    JobAnnouncement, JobSpec, JobType, PrivacyMode, PrivacyPolicy,
+    bundle_hash, load_signing_key_from_base64_seed, sha256_file, sign_job_announcement,
+    verify_execution_receipt_signature, verify_receipt_availability_signature,
+    verifying_key_from_base64, verifying_key_to_base64, ExecutionReceipt, JobAnnouncement, JobSpec,
+    JobType, PrivacyMode, PrivacyPolicy, ReceiptAvailability, ReceiptBundle,
 };
 use osciris_node::status::calculate_quorum_status;
 use osciris_node::store::ProtocolStore;
@@ -171,6 +173,7 @@ pub enum DaemonCommand {
     SubmitJob { job_id: String },
     PublishJob { job_id: String },
     RefreshProtocolJobs,
+    IngestEvidence { input: EvidenceIngestionInput },
     ConfigureWallet { input: WalletConfigInput },
     RefreshWallet,
     PrepareWithdrawal { input: WithdrawalInput },
@@ -393,6 +396,12 @@ pub struct UnsignedTokenTransfer {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceIngestionInput {
+    pub job_id: String,
+    pub evidence_dir: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceSnapshot {
     pub jobs: Vec<DesktopJob>,
     pub wallet: WalletStatus,
@@ -530,6 +539,16 @@ impl DaemonService {
                 Err(error) => DaemonResponse::error(
                     request.request_id,
                     "protocol_refresh_failed",
+                    error.to_string(),
+                ),
+            },
+            DaemonCommand::IngestEvidence { input } => match self.ingest_evidence(input).await {
+                Ok(workspace) => {
+                    DaemonResponse::success(request.request_id, DaemonResult::Workspace(workspace))
+                }
+                Err(error) => DaemonResponse::error(
+                    request.request_id,
+                    "evidence_ingestion_failed",
                     error.to_string(),
                 ),
             },
@@ -783,6 +802,57 @@ impl DaemonService {
                 .filter(|job| job.state != DesktopJobState::Draft)
                 .count() as u32,
         })
+    }
+
+    async fn ingest_evidence(&self, input: EvidenceIngestionInput) -> Result<WorkspaceSnapshot> {
+        let evidence_dir = PathBuf::from(input.evidence_dir);
+        if !evidence_dir.is_dir() {
+            bail!(
+                "evidence directory {} does not exist",
+                evidence_dir.display()
+            );
+        }
+        let protocol_store = ProtocolStore::open(&self.inner.state_dir.join("protocol"))
+            .await
+            .context("open daemon protocol store")?;
+        let availability = protocol_store
+            .load_receipt_availability_by_job(&input.job_id)
+            .await
+            .context("load protocol receipt availability")?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("no receipt availability found for job {}", input.job_id))?;
+        verify_availability_signature(&availability)?;
+        let validated = validate_fetched_evidence(&evidence_dir, &availability)?;
+        if validated.job_spec.job_id.to_string() != input.job_id {
+            bail!(
+                "evidence job_id {} does not match requested job_id {}",
+                validated.job_spec.job_id,
+                input.job_id
+            );
+        }
+        protocol_store
+            .upsert_job_spec(
+                &validated.job_spec,
+                &json_enum_label(&validated.execution_receipt.status)?,
+                Some(&evidence_dir),
+                Some(&validated.execution_receipt.metrics_path),
+            )
+            .await
+            .context("record ingested job spec")?;
+        protocol_store
+            .record_execution_receipt(
+                &validated.execution_receipt,
+                &evidence_dir,
+                &validated.execution_receipt.metrics_path,
+            )
+            .await
+            .context("record ingested execution receipt")?;
+        protocol_store
+            .record_receipt_bundle(&validated.bundle)
+            .await
+            .context("record ingested receipt bundle")?;
+        self.refresh_protocol_jobs().await
     }
 
     async fn configure_wallet(&self, input: WalletConfigInput) -> Result<WalletStatus> {
@@ -1112,6 +1182,16 @@ impl DaemonClient {
         }
     }
 
+    pub async fn ingest_evidence(
+        &self,
+        input: EvidenceIngestionInput,
+    ) -> Result<WorkspaceSnapshot> {
+        match self.send(DaemonCommand::IngestEvidence { input }).await? {
+            DaemonResult::Workspace(workspace) => Ok(workspace),
+            result => bail!("unexpected daemon result: {result:?}"),
+        }
+    }
+
     pub async fn configure_wallet(&self, input: WalletConfigInput) -> Result<WalletStatus> {
         match self.send(DaemonCommand::ConfigureWallet { input }).await? {
             DaemonResult::Wallet(wallet) => Ok(wallet),
@@ -1416,6 +1496,116 @@ fn desktop_required_capability(profile: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ValidatedFetchedEvidence {
+    job_spec: JobSpec,
+    execution_receipt: ExecutionReceipt,
+    bundle: ReceiptBundle,
+}
+
+fn validate_fetched_evidence(
+    evidence_dir: &Path,
+    availability: &ReceiptAvailability,
+) -> Result<ValidatedFetchedEvidence> {
+    let job_spec_path = evidence_dir.join("job_spec.json");
+    let execution_receipt_path = evidence_dir.join("execution_receipt.json");
+    let receipt_bundle_path = evidence_dir.join("receipt_bundle.json");
+    let job_spec: JobSpec = serde_json::from_slice(
+        &fs::read(&job_spec_path)
+            .with_context(|| format!("failed to read {}", job_spec_path.display()))?,
+    )?;
+    let execution_receipt: ExecutionReceipt = serde_json::from_slice(
+        &fs::read(&execution_receipt_path)
+            .with_context(|| format!("failed to read {}", execution_receipt_path.display()))?,
+    )?;
+    if job_spec.job_id != availability.job_id {
+        bail!(
+            "job spec job_id {} does not match availability job_id {}",
+            job_spec.job_id,
+            availability.job_id
+        );
+    }
+    if job_spec.job_id != execution_receipt.job_id {
+        bail!(
+            "job spec job_id {} does not match execution receipt job_id {}",
+            job_spec.job_id,
+            execution_receipt.job_id
+        );
+    }
+    if execution_receipt.provider_id != availability.provider_node_id {
+        bail!(
+            "fetched execution receipt provider_id {} does not match availability provider {}",
+            execution_receipt.provider_id,
+            availability.provider_node_id
+        );
+    }
+    let execution_sha256 = sha256_file(&execution_receipt_path)?;
+    if execution_sha256 != availability.execution_receipt_sha256 {
+        bail!(
+            "execution receipt hash mismatch: fetched {} but availability advertised {}",
+            execution_sha256,
+            availability.execution_receipt_sha256
+        );
+    }
+    let provider_key = verifying_key_from_base64(&availability.provider_ed25519_public_key_base64)?;
+    verify_execution_receipt_signature(&execution_receipt, &provider_key)
+        .context("fetched execution receipt signature invalid")?;
+
+    let bundle: ReceiptBundle = serde_json::from_slice(
+        &fs::read(&receipt_bundle_path)
+            .with_context(|| format!("failed to read {}", receipt_bundle_path.display()))?,
+    )?;
+    if bundle.job_id != availability.job_id {
+        bail!(
+            "fetched bundle job_id {} does not match availability job_id {}",
+            bundle.job_id,
+            availability.job_id
+        );
+    }
+    if bundle.execution_receipt_sha256 != availability.execution_receipt_sha256 {
+        bail!(
+            "bundle execution hash {} does not match availability execution hash {}",
+            bundle.execution_receipt_sha256,
+            availability.execution_receipt_sha256
+        );
+    }
+    let recomputed_bundle_hash = bundle_hash(&bundle)?;
+    if recomputed_bundle_hash != bundle.bundle_sha256 {
+        bail!(
+            "bundle hash field {} does not match recomputed hash {}",
+            bundle.bundle_sha256,
+            recomputed_bundle_hash
+        );
+    }
+    if bundle.bundle_sha256 != availability.bundle_sha256 {
+        bail!(
+            "bundle hash {} does not match availability bundle hash {}",
+            bundle.bundle_sha256,
+            availability.bundle_sha256
+        );
+    }
+
+    Ok(ValidatedFetchedEvidence {
+        job_spec,
+        execution_receipt,
+        bundle,
+    })
+}
+
+fn verify_availability_signature(availability: &ReceiptAvailability) -> Result<()> {
+    let verifying_key =
+        verifying_key_from_base64(&availability.provider_ed25519_public_key_base64)?;
+    verify_receipt_availability_signature(availability, &verifying_key)?;
+    Ok(())
+}
+
+fn json_enum_label<T: Serialize>(value: &T) -> Result<String> {
+    match serde_json::to_value(value)? {
+        Value::String(label) => Ok(label),
+        _ => bail!("enum did not serialize to a string label"),
+    }
+}
+
 fn validate_job_input(input: &CreateJobInput) -> Result<()> {
     if input.title.trim().is_empty() || input.title.trim().len() > 96 {
         bail!("job title must contain 1 to 96 characters");
@@ -1517,6 +1707,9 @@ fn update_wallet_commitment(state: &mut PersistedState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use osciris_core::sign_receipt_availability;
+    use osciris_node::{run_job, ProviderConfig};
 
     fn valid_job_input() -> CreateJobInput {
         CreateJobInput {
@@ -1646,6 +1839,86 @@ mod tests {
             Some("provider-a".to_string())
         );
         assert!(refreshed.jobs[0].progress_percent >= 50);
+    }
+
+    #[tokio::test]
+    async fn ingest_evidence_records_receipt_and_refreshes_job() {
+        let directory = tempfile::tempdir().unwrap();
+        let provider_work_root = tempfile::tempdir().unwrap();
+        let service = DaemonService::new(directory.path().to_path_buf()).unwrap();
+        let job = service.create_job(valid_job_input()).await.unwrap();
+        service.submit_job(&job.job_id).await.unwrap();
+        service.publish_job(&job.job_id).await.unwrap();
+
+        let store = ProtocolStore::open(&directory.path().join("protocol"))
+            .await
+            .unwrap();
+        let announcement = store
+            .load_job_announcement(&job.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let provider_key = ed25519_dalek::SigningKey::from_bytes(&[9_u8; 32]);
+        let provider_public = verifying_key_to_base64(&provider_key.verifying_key());
+        let provider = ProviderConfig {
+            provider_id: "provider-a".to_string(),
+            signing_key_id: "provider-a-key".to_string(),
+            signing_key_seed_base64: BASE64.encode([9_u8; 32]),
+            repo_root: std::env::current_dir().unwrap(),
+            work_root: provider_work_root.path().to_path_buf(),
+        };
+        let output = run_job(&announcement.job_spec, &provider).await.unwrap();
+        let mut availability = ReceiptAvailability {
+            job_id: announcement.job_id,
+            provider_node_id: provider.provider_id.clone(),
+            provider_ed25519_public_key_base64: provider_public,
+            execution_receipt_sha256: sha256_file(&output.execution_receipt_path).unwrap(),
+            bundle_sha256: {
+                let bundle: ReceiptBundle =
+                    serde_json::from_slice(&fs::read(&output.receipt_bundle_path).unwrap())
+                        .unwrap();
+                bundle.bundle_sha256
+            },
+            bundle_uri: format!("file://{}", output.evidence_dir.display()),
+            announced_at: Utc::now().to_rfc3339(),
+            signature: String::new(),
+        };
+        availability.signature = sign_receipt_availability(&availability, &provider_key).unwrap();
+        store
+            .record_receipt_availability(&availability)
+            .await
+            .unwrap();
+
+        let refreshed = service
+            .ingest_evidence(EvidenceIngestionInput {
+                job_id: job.job_id.clone(),
+                evidence_dir: output.evidence_dir.display().to_string(),
+            })
+            .await
+            .unwrap();
+        let refreshed_job = &refreshed.jobs[0];
+        assert_eq!(refreshed_job.state, DesktopJobState::Verifying);
+        assert_eq!(
+            refreshed_job.provider_node_id,
+            Some("provider-a".to_string())
+        );
+        assert_eq!(
+            refreshed_job.evidence.execution_receipt_sha256,
+            Some(availability.execution_receipt_sha256.clone())
+        );
+        assert_eq!(
+            refreshed_job.evidence.bundle_sha256,
+            Some(availability.bundle_sha256.clone())
+        );
+        assert_eq!(
+            store
+                .load_receipt_bundle(&job.job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .bundle_sha256,
+            availability.bundle_sha256
+        );
     }
 
     #[test]
