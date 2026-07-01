@@ -1,19 +1,39 @@
 import { useEffect, useState } from "react";
 import {
+  configureWallet,
+  createJob,
+  type CreateJobInput,
   type DaemonStatus,
   getDaemonStatus,
+  getWorkspace,
   launchDaemon,
+  prepareWithdrawal,
+  refreshWallet,
   setParticipation,
+  submitJob,
+  type UnsignedTokenTransfer,
+  type WalletConfigInput,
+  type WithdrawalInput,
+  type WorkspaceSnapshot,
 } from "./lib/daemon";
+import {
+  EvidenceView,
+  JobDetailView,
+  JobsView,
+  NodeView,
+  OverviewView,
+  WalletView,
+} from "./views";
 
+type View = "overview" | "jobs" | "evidence" | "wallet" | "node";
 type ConnectionState = "loading" | "connected" | "offline";
 
-const navigation = [
-  { label: "Overview", active: true },
-  { label: "Hardware", active: false },
-  { label: "Models", active: false },
-  { label: "Jobs", active: false },
-  { label: "Receipts", active: false },
+const navigation: Array<{ id: View; label: string; group: string }> = [
+  { id: "overview", label: "Overview", group: "Workspace" },
+  { id: "jobs", label: "Compute jobs", group: "Workspace" },
+  { id: "evidence", label: "Evidence", group: "Workspace" },
+  { id: "wallet", label: "Wallet", group: "Economics" },
+  { id: "node", label: "Local node", group: "Operator" },
 ];
 
 function LogoMark() {
@@ -33,118 +53,136 @@ function LogoMark() {
   );
 }
 
-function StatusDot({ live }: { live: boolean }) {
-  return <span className={live ? "status-dot live" : "status-dot"} />;
-}
-
-function formatDuration(totalSeconds: number) {
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  if (hours === 0) return `${minutes}m`;
-  return `${hours}h ${minutes}m`;
-}
-
-function titleCase(value: string) {
-  return value
-    .split("_")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
+function viewTitle(view: View) {
+  return {
+    overview: "Overview",
+    jobs: "Compute jobs",
+    evidence: "Evidence",
+    wallet: "Wallet",
+    node: "Local node",
+  }[view];
 }
 
 export default function App() {
+  const [view, setView] = useState<View>("overview");
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [status, setStatus] = useState<DaemonStatus | null>(null);
+  const [workspace, setWorkspace] = useState<WorkspaceSnapshot | null>(null);
   const [connection, setConnection] = useState<ConnectionState>("loading");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [withdrawal, setWithdrawal] =
+    useState<UnsignedTokenTransfer | null>(null);
 
-  async function refreshStatus(showError = false) {
+  async function refreshAll(showError = false) {
     try {
-      const next = await getDaemonStatus();
-      setStatus(next);
+      const nextStatus = await getDaemonStatus();
+      const nextWorkspace = await getWorkspace();
+      setStatus(nextStatus);
+      setWorkspace(nextWorkspace);
       setConnection("connected");
       setError(null);
     } catch (requestError) {
       setStatus(null);
+      setWorkspace(null);
       setConnection("offline");
-      if (showError) {
-        setError(String(requestError));
-      }
+      if (showError) setError(String(requestError));
     }
   }
 
   useEffect(() => {
-    void refreshStatus();
-    const timer = window.setInterval(() => void refreshStatus(), 4_000);
+    void refreshAll();
+    const timer = window.setInterval(() => void refreshAll(), 8_000);
     return () => window.clearInterval(timer);
   }, []);
 
-  async function handleLaunch() {
+  async function runAction<T>(action: () => Promise<T>, after?: (value: T) => void) {
     setBusy(true);
     setError(null);
     try {
-      const next = await launchDaemon();
-      setStatus(next);
-      setConnection("connected");
-    } catch (launchError) {
-      setError(String(launchError));
-      setConnection("offline");
+      const value = await action();
+      after?.(value);
+      await refreshAll();
+    } catch (actionError) {
+      setError(String(actionError));
     } finally {
       setBusy(false);
     }
   }
 
-  async function handleParticipation(enabled: boolean) {
-    setBusy(true);
-    setError(null);
-    try {
-      setStatus(await setParticipation(enabled));
-    } catch (controlError) {
-      setError(String(controlError));
-    } finally {
-      setBusy(false);
-    }
+  async function handleLaunch() {
+    await runAction(launchDaemon, (next) => {
+      setStatus(next);
+      setConnection("connected");
+    });
   }
 
   const daemonLive = connection === "connected" && status !== null;
-  const participating = status?.participation_enabled ?? false;
-  const stateLabel = !daemonLive
-    ? "Daemon offline"
-    : participating
-      ? "Participation enabled"
-      : "Participation paused";
+  const selectedJob =
+    workspace?.jobs.find((job) => job.job_id === selectedJobId) ?? null;
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand">
+        <button
+          className="brand"
+          onClick={() => {
+            setView("overview");
+            setSelectedJobId(null);
+          }}
+          type="button"
+        >
           <span className="brand-mark">
             <LogoMark />
           </span>
-          <span>OSCIRIS</span>
-        </div>
+          <span>
+            OSCIRIS
+            <small>Compute workspace</small>
+          </span>
+        </button>
 
         <nav aria-label="Primary">
-          <p className="nav-label">Node</p>
-          {navigation.map((item) => (
-            <button
-              className={item.active ? "nav-item active" : "nav-item"}
-              disabled={!item.active}
-              key={item.label}
-              type="button"
-            >
-              <span className="nav-glyph" />
-              {item.label}
-              {!item.active && <span className="soon">Soon</span>}
-            </button>
+          {["Workspace", "Economics", "Operator"].map((group) => (
+            <div className="nav-group" key={group}>
+              <p className="nav-label">{group}</p>
+              {navigation
+                .filter((item) => item.group === group)
+                .map((item) => (
+                  <button
+                    className={
+                      view === item.id && !selectedJob
+                        ? "nav-item active"
+                        : "nav-item"
+                    }
+                    key={item.id}
+                    onClick={() => {
+                      setView(item.id);
+                      setSelectedJobId(null);
+                    }}
+                    type="button"
+                  >
+                    <span className={`nav-glyph glyph-${item.id}`} />
+                    {item.label}
+                    {item.id === "jobs" && workspace?.jobs.length ? (
+                      <span className="nav-count">{workspace.jobs.length}</span>
+                    ) : null}
+                  </button>
+                ))}
+            </div>
           ))}
         </nav>
 
         <div className="sidebar-foot">
-          <div className="identity-orb">OS</div>
+          <div className={daemonLive ? "identity-orb live" : "identity-orb"}>
+            OS
+          </div>
           <div>
-            <strong>Local participant</strong>
-            <span>Identity not configured</span>
+            <strong>{daemonLive ? "Workspace connected" : "Daemon offline"}</strong>
+            <span>
+              {workspace?.wallet.address
+                ? `${workspace.wallet.address.slice(0, 8)}…${workspace.wallet.address.slice(-4)}`
+                : "No wallet configured"}
+            </span>
           </div>
         </div>
       </aside>
@@ -152,184 +190,132 @@ export default function App() {
       <main>
         <header className="topbar">
           <div>
-            <span className="breadcrumb">Participant node</span>
-            <h1>Overview</h1>
+            <span className="breadcrumb">
+              {selectedJob ? "Compute jobs / Detail" : "OSCIRIS workspace"}
+            </span>
+            <h1>{selectedJob ? selectedJob.title : viewTitle(view)}</h1>
           </div>
           <div className="topbar-actions">
-            <div className="connection-chip">
-              <StatusDot live={daemonLive} />
-              {daemonLive ? "Daemon connected" : "Daemon offline"}
+            <div className={daemonLive ? "connection-chip live" : "connection-chip"}>
+              <span className="status-dot" />
+              {daemonLive ? "Testnet workspace" : "Local daemon offline"}
             </div>
-            <button
-              className="icon-button"
-              type="button"
-              aria-label="Refresh daemon status"
-              onClick={() => void refreshStatus(true)}
-            >
-              ↻
-            </button>
+            {!daemonLive ? (
+              <button
+                className="compact-primary"
+                disabled={busy}
+                onClick={() => void handleLaunch()}
+                type="button"
+              >
+                {busy ? "Starting…" : "Start daemon"}
+              </button>
+            ) : (
+              <button
+                aria-label="Refresh workspace"
+                className="icon-button"
+                onClick={() => void refreshAll(true)}
+                type="button"
+              >
+                ↻
+              </button>
+            )}
           </div>
         </header>
 
-        <section className="hero-panel">
-          <div className="hero-copy">
-            <span className="eyebrow">LOCAL NODE CONTROL</span>
-            <h2>{stateLabel}</h2>
-            <p>
-              Models and workloads stay on participant machines. This desktop
-              controls your local daemon and reports only measured node state.
-            </p>
-            <div className="hero-actions">
-              {!daemonLive ? (
-                <button
-                  className="primary-button"
-                  disabled={busy}
-                  onClick={() => void handleLaunch()}
-                  type="button"
-                >
-                  {busy ? "Starting…" : "Start local daemon"}
-                </button>
-              ) : (
-                <button
-                  className={participating ? "secondary-button" : "primary-button"}
-                  disabled={busy}
-                  onClick={() => void handleParticipation(!participating)}
-                  type="button"
-                >
-                  {busy
-                    ? "Updating…"
-                    : participating
-                      ? "Pause participation"
-                      : "Enable participation"}
-                </button>
-              )}
-              <span className="endpoint-note">
-                Per-user authenticated IPC · API v{status?.api_version ?? 1}
+        {error ? (
+          <div className="error-banner" role="alert">
+            <strong>Action needs attention</strong>
+            <span>{error}</span>
+            <button onClick={() => setError(null)} type="button">
+              Dismiss
+            </button>
+          </div>
+        ) : null}
+
+        {!daemonLive && view !== "node" ? (
+          <section className="offline-strip">
+            <div>
+              <strong>Start the local daemon to use the workspace</strong>
+              <span>
+                Job drafts and wallet configuration are stored locally, never in
+                the webview.
               </span>
             </div>
-          </div>
-          <div className="signal-visual" aria-hidden="true">
-            <div className="signal-ring ring-one" />
-            <div className="signal-ring ring-two" />
-            <div className={daemonLive ? "signal-core active" : "signal-core"}>
-              <LogoMark />
-            </div>
-            <span className="signal-node node-a" />
-            <span className="signal-node node-b" />
-            <span className="signal-node node-c" />
-          </div>
-        </section>
+            <button
+              className="secondary-button"
+              disabled={busy}
+              onClick={() => void handleLaunch()}
+              type="button"
+            >
+              Start daemon
+            </button>
+          </section>
+        ) : null}
 
-        {error && (
-          <div className="error-banner" role="alert">
-            <strong>Local control failed</strong>
-            <span>{error}</span>
-          </div>
-        )}
-
-        <section className="metric-grid" aria-label="Node metrics">
-          <article className="metric-card">
-            <div className="metric-head">
-              <span>Daemon</span>
-              <StatusDot live={daemonLive} />
-            </div>
-            <strong>{status ? `v${status.daemon_version}` : "Not running"}</strong>
-            <p>
-              {status
-                ? `${formatDuration(status.uptime_seconds)} uptime`
-                : "Start the local process to expose node controls."}
-            </p>
-          </article>
-          <article className="metric-card">
-            <div className="metric-head">
-              <span>Network</span>
-              <span className="metric-tag">Pending</span>
-            </div>
-            <strong>
-              {status ? titleCase(status.network_state) : "Not configured"}
-            </strong>
-            <p>Peer bootstrap and live readiness arrive in the next daemon API.</p>
-          </article>
-          <article className="metric-card">
-            <div className="metric-head">
-              <span>Platform</span>
-              <span className="metric-tag neutral">Local</span>
-            </div>
-            <strong>
-              {status
-                ? `${titleCase(status.platform.operating_system)} · ${status.platform.architecture}`
-                : "Awaiting daemon"}
-            </strong>
-            <p>Accelerator detection and signed capability are not yet published.</p>
-          </article>
-          <article className="metric-card">
-            <div className="metric-head">
-              <span>Active jobs</span>
-              <span className="metric-tag neutral">Measured</span>
-            </div>
-            <strong>{status?.active_jobs ?? "—"}</strong>
-            <p>No synthetic workload counts are shown.</p>
-          </article>
-        </section>
-
-        <section className="content-grid">
-          <article className="readiness-card">
-            <div className="section-heading">
-              <div>
-                <span className="eyebrow">NETWORK READINESS</span>
-                <h3>Capacity gaps</h3>
-              </div>
-              <span className="pending-badge">Snapshot pending</span>
-            </div>
-            <div className="gap-table">
-              {[
-                ["Compatible providers", "4", "Provider API pending"],
-                ["Inference slots", "3", "Profile API pending"],
-                ["Independent verifiers", "2", "Peer API pending"],
-              ].map(([label, target, note]) => (
-                <div className="gap-row" key={label}>
-                  <div>
-                    <strong>{label}</strong>
-                    <span>{note}</span>
-                  </div>
-                  <div className="gap-value">
-                    <span>—</span>
-                    <small>/ {target}</small>
-                  </div>
-                </div>
-              ))}
-            </div>
-            <p className="card-footnote">
-              Gaps activate only after the daemon receives signed peer and
-              profile snapshots.
-            </p>
-          </article>
-
-          <article className="activity-card">
-            <div className="section-heading">
-              <div>
-                <span className="eyebrow">LOCAL ACTIVITY</span>
-                <h3>Receipts and jobs</h3>
-              </div>
-            </div>
-            <div className="empty-state">
-              <div className="empty-icon">
-                <span />
-                <span />
-                <span />
-              </div>
-              <strong>No local activity yet</strong>
-              <p>
-                Verified jobs, receipts, and testnet anchors will appear here
-                after their daemon endpoints are connected.
-              </p>
-            </div>
-          </article>
-        </section>
+        <div className="view-stage">
+          {selectedJob ? (
+            <JobDetailView
+              job={selectedJob}
+              onBack={() => setSelectedJobId(null)}
+              onSubmit={(jobId) =>
+                void runAction(() => submitJob(jobId), () => setSelectedJobId(jobId))
+              }
+              busy={busy}
+            />
+          ) : view === "overview" ? (
+            <OverviewView
+              status={status}
+              workspace={workspace}
+              onCreateJob={() => setView("jobs")}
+              onOpenJob={setSelectedJobId}
+              onOpenWallet={() => setView("wallet")}
+            />
+          ) : view === "jobs" ? (
+            <JobsView
+              jobs={workspace?.jobs ?? []}
+              daemonLive={daemonLive}
+              busy={busy}
+              onCreate={(input: CreateJobInput) =>
+                void runAction(() => createJob(input))
+              }
+              onOpen={setSelectedJobId}
+            />
+          ) : view === "evidence" ? (
+            <EvidenceView
+              jobs={workspace?.jobs ?? []}
+              onOpen={setSelectedJobId}
+            />
+          ) : view === "wallet" ? (
+            <WalletView
+              wallet={workspace?.wallet ?? null}
+              jobs={workspace?.jobs ?? []}
+              busy={busy}
+              withdrawal={withdrawal}
+              onConfigure={(input: WalletConfigInput) =>
+                void runAction(() => configureWallet(input))
+              }
+              onRefresh={() => void runAction(refreshWallet)}
+              onPrepare={(input: WithdrawalInput) =>
+                void runAction(() => prepareWithdrawal(input), setWithdrawal)
+              }
+              onClearWithdrawal={() => setWithdrawal(null)}
+            />
+          ) : (
+            <NodeView
+              status={status}
+              daemonLive={daemonLive}
+              busy={busy}
+              onLaunch={() => void handleLaunch()}
+              onParticipation={(enabled) =>
+                void runAction(() => setParticipation(enabled))
+              }
+            />
+          )}
+        </div>
 
         <footer className="app-footer">
-          <span>OSCIRIS Node Desktop · Foundation build</span>
-          <span>Provider-local compute · No central inference server</span>
+          <span>OSCIRIS Node Desktop · Testnet workspace</span>
+          <span>Private compute · Verified execution · External key custody</span>
         </footer>
       </main>
     </div>

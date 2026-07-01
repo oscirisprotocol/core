@@ -14,15 +14,21 @@ React webview
   -> protocol, peer, receipt, and provider-local runtime modules
 ```
 
-The first foundation release exposes only:
+The desktop bridge exposes:
 
 - daemon launch;
 - daemon status;
 - pause participation;
-- resume participation.
+- resume participation;
+- persisted training and inference job drafts;
+- explicit transition from draft to funding review;
+- watch-only Horizen testnet wallet configuration;
+- native and configured ERC-20 balance reads;
+- unsigned ERC-20 withdrawal transaction preparation.
 
-Identity, hardware, models, jobs, receipts, readiness, and inference remain
-visible as pending modules until their daemon endpoints return measured data.
+Identity, hardware discovery, provider matching, execution, receipts, readiness,
+and inference remain visible as pending modules until their daemon endpoints
+return measured data.
 
 ## Local IPC
 
@@ -41,7 +47,8 @@ only the registered status, launch, and participation commands.
 
 ## State
 
-Participation mode is persisted atomically in `daemon-state.json`. Starting the
+Participation mode, job drafts, lifecycle records, and watch-only wallet
+configuration are persisted atomically in `daemon-state.json`. Starting the
 desktop does not automatically opt a machine into work. The default is paused.
 
 Current status fields are deliberately bounded:
@@ -65,6 +72,11 @@ hardware claims, jobs, receipts, or rewards.
 - React has no shell, filesystem, network, or secret-storage permission.
 - The Rust layer resolves a fixed daemon binary; the frontend cannot provide an
   executable path or arbitrary arguments.
+- The wallet stores only public addresses and token metadata. It never accepts
+  a private key or seed phrase.
+- Horizen RPC access is fixed to the official HTTPS testnet endpoint.
+- Withdrawals are unsigned ERC-20 payloads for review and signing in an external
+  wallet.
 - Future model installers must verify profile revision, artifact SHA-256, and
   license before execution.
 - Future application updates require signed Tauri updater artifacts and

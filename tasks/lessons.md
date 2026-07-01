@@ -20,3 +20,7 @@
   developer workspace. Bundle the target-native daemon as a fixed sidecar and
   verify the installed artifact contains it before presenting launch controls
   as complete.
+- Do not label a configurable Horizen testnet settlement token as official
+  USDC. Horizen publishes mainnet USDC, but the official testnet token list does
+  not include USDC; use an explicit `USDC_TEST` boundary until a test contract
+  is deployed and verified.

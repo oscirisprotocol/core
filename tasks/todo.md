@@ -1,5 +1,88 @@
 # Task Plan
 
+## Investor-Ready Compute Workspace
+
+### Objective
+
+Turn OSCIRIS Node Desktop into a holistic buyer and operator workspace that
+communicates the complete product: create training and inference jobs, track
+their lifecycle, inspect results and verification evidence, and manage the
+testnet treasury boundary without inventing network activity or taking custody
+of private keys.
+
+### Product Surface
+
+- Overview: spend, active jobs, verified completions, node/network readiness.
+- Jobs: training and inference filters with draft, funding, queue, execution,
+  verification, completed, and failed states.
+- New job: model, workload, privacy mode, hardware profile, verifier quorum,
+  budget, and challenge-window inputs.
+- Job detail: timeline, economics, provider assignment, artifacts, execution
+  receipt, verifier result, and chain anchor.
+- Wallet: watch-only Horizen testnet address, native/test-token balances,
+  deposit coordinates, committed funds, spend history, and withdrawal
+  preparation for external signing.
+- Evidence: receipt and anchor surfaces derived only from daemon records.
+
+### Trust Boundary
+
+- Persist job drafts and wallet configuration in the per-user daemon state.
+- Keep private keys and seed phrases outside OSCIRIS Desktop.
+- Read balances over the official Horizen testnet RPC.
+- Label configurable ERC-20 balances as test tokens, never official testnet
+  USDC.
+- Do not enable funded job submission or ERC-20 withdrawal while protocol
+  escrow rejects non-native payment tokens.
+- Allow externally signed transaction preparation only after a settlement-token
+  contract is explicitly configured.
+
+### Checklist
+
+- [x] Add daemon job, evidence, wallet, and transaction-preparation types
+- [x] Add versioned IPC commands and atomic persistence
+- [x] Add Horizen testnet balance reads and fail-closed address validation
+- [x] Add Overview, Jobs, Job Detail, Evidence, and Wallet navigation
+- [x] Add training and inference job creation flows
+- [x] Add lifecycle, economics, receipt, and verifier components
+- [x] Add watch-only deposit and external-signing withdrawal flows
+- [x] Add responsive investor-demo visual states and honest empty states
+- [x] Add daemon, bridge, and frontend tests
+- [x] Update architecture, security, and product-boundary documentation
+- [x] Run full cross-platform-quality verification
+
+### Review
+
+- Added persisted training and inference drafts with privacy, hardware, quorum,
+  challenge-window, and stable-value budget controls.
+- Added an explicit draft-to-funding-review transition. Later lifecycle states
+  remain protocol-owned and cannot be fabricated by Desktop.
+- Added Overview, Compute Jobs, Job Detail, Evidence, Wallet, and Local Node
+  product surfaces with pending, running, completed, and failed filtering.
+- Added watch-only Horizen testnet wallet configuration, official RPC chain-ID
+  validation, native balance reads, configurable test-token reads, deposit
+  coordinates, committed-budget reporting, and unsigned ERC-20 transfer
+  preparation.
+- Private keys and seed phrases remain outside Desktop. Zero addresses are
+  rejected and withdrawal preparation remains disabled until a nonzero
+  test-token contract is configured.
+- Added an explicit stablecoin boundary: Horizen documents mainnet USDC but no
+  official Horizen-testnet USDC contract, so the UI uses `USDC_TEST` and does
+  not present it as Circle-issued USDC.
+- Native smoke testing passed in an isolated state directory:
+  - bundled sidecar started from the `.app`
+  - inference draft persisted
+  - funding-review transition persisted
+  - Horizen RPC balance synchronized
+  - committed budget updated to match the submitted job
+- Verification passed:
+  - 70 workspace tests passed; one live-RPC test remains ignored by default
+  - live Horizen RPC test passed separately
+  - strict Clippy passed for protocol and Tauri workspaces
+  - production frontend build passed without compatibility warnings
+  - production dependency audit found no known vulnerabilities
+  - macOS arm64 `.app` bundled GUI, daemon, `LICENSE`, and `NOTICE`
+  - responsive `860x620` review found no horizontal overflow
+
 ## Cross-Platform OSCIRIS Node Desktop Foundation
 
 ### Objective

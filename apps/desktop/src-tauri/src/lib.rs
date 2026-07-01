@@ -5,7 +5,10 @@ use std::{
     time::Duration,
 };
 
-use osciris_daemon::{default_state_dir, DaemonClient, DaemonStatus};
+use osciris_daemon::{
+    default_state_dir, CreateJobInput, DaemonClient, DaemonStatus, DesktopJob,
+    UnsignedTokenTransfer, WalletConfigInput, WalletStatus, WithdrawalInput, WorkspaceSnapshot,
+};
 
 #[tauri::command]
 async fn daemon_status() -> Result<DaemonStatus, String> {
@@ -19,6 +22,54 @@ async fn daemon_status() -> Result<DaemonStatus, String> {
 async fn set_participation(enabled: bool) -> Result<DaemonStatus, String> {
     DaemonClient::default_for_user()
         .set_participation(enabled)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn workspace_snapshot() -> Result<WorkspaceSnapshot, String> {
+    DaemonClient::default_for_user()
+        .workspace()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn create_job(input: CreateJobInput) -> Result<DesktopJob, String> {
+    DaemonClient::default_for_user()
+        .create_job(input)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn submit_job(job_id: String) -> Result<DesktopJob, String> {
+    DaemonClient::default_for_user()
+        .submit_job(job_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn configure_wallet(input: WalletConfigInput) -> Result<WalletStatus, String> {
+    DaemonClient::default_for_user()
+        .configure_wallet(input)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn refresh_wallet() -> Result<WalletStatus, String> {
+    DaemonClient::default_for_user()
+        .refresh_wallet()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn prepare_withdrawal(input: WithdrawalInput) -> Result<UnsignedTokenTransfer, String> {
+    DaemonClient::default_for_user()
+        .prepare_withdrawal(input)
         .await
         .map_err(|error| error.to_string())
 }
@@ -94,9 +145,15 @@ fn resolve_daemon_binary() -> Option<PathBuf> {
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
+            configure_wallet,
+            create_job,
             daemon_status,
             launch_daemon,
-            set_participation
+            prepare_withdrawal,
+            refresh_wallet,
+            set_participation,
+            submit_job,
+            workspace_snapshot
         ])
         .run(tauri::generate_context!())
         .expect("error while running OSCIRIS desktop");
