@@ -79,8 +79,9 @@ hardware claims, jobs, receipts, or rewards.
   wallet.
 - Future model installers must verify profile revision, artifact SHA-256, and
   license before execution.
-- Future application updates require signed Tauri updater artifacts and
-  platform code signing.
+- Application updates use signed Tauri updater artifacts from the latest
+  GitHub Release. Checks run asynchronously; download and installation require
+  explicit operator approval, and unsigned packages are rejected.
 
 ## Development
 

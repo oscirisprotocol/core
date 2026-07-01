@@ -319,6 +319,10 @@ Desktop compute workspace and wallet boundary:
 
 [docs/desktop_product_workspace.md](docs/desktop_product_workspace.md)
 
+Signed desktop updates:
+
+[docs/desktop_updates.md](docs/desktop_updates.md)
+
 ## Related Components
 
 - DSP engine and benchmarks: private internal repository, summarized publicly in the

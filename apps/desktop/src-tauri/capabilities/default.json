@@ -3,5 +3,9 @@
   "identifier": "main-window",
   "description": "Minimal capability set for the local OSCIRIS node controller",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "process:allow-restart",
+    "updater:default"
+  ]
 }

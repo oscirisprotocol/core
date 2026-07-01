@@ -16,6 +16,18 @@ import type {
   WorkspaceSnapshot,
 } from "./lib/daemon";
 
+export type DesktopUpdateStatus =
+  | { phase: "idle" | "checking" | "current" }
+  | { phase: "available"; version: string; notes: string | null }
+  | {
+      phase: "downloading";
+      version: string;
+      downloaded: number;
+      total: number | null;
+    }
+  | { phase: "installed"; version: string }
+  | { phase: "error"; message: string };
+
 const lifecycle: JobState[] = [
   "draft",
   "awaiting_funding",
@@ -1541,6 +1553,9 @@ export function NodeView({
   onParticipation,
   onStartNetwork,
   onStopNetwork,
+  updateStatus,
+  onCheckForUpdate,
+  onInstallUpdate,
 }: {
   status: DaemonStatus | null;
   daemonLive: boolean;
@@ -1549,6 +1564,9 @@ export function NodeView({
   onParticipation: (enabled: boolean) => void;
   onStartNetwork: (input: NetworkControlInput) => void;
   onStopNetwork: () => void;
+  updateStatus: DesktopUpdateStatus;
+  onCheckForUpdate: () => void;
+  onInstallUpdate: () => void;
 }) {
   const participating = status?.participation_enabled ?? false;
   const networkOnline = status?.network_state === "online";
@@ -1558,6 +1576,10 @@ export function NodeView({
   const [bootstrapText, setBootstrapText] = useState(
     status?.network_bootstrap_peers.join("\n") ?? "",
   );
+  const updateProgress =
+    updateStatus.phase === "downloading" && updateStatus.total
+      ? Math.min(100, (updateStatus.downloaded / updateStatus.total) * 100)
+      : null;
 
   function startNetwork(event: React.FormEvent) {
     event.preventDefault();
@@ -1645,6 +1667,97 @@ export function NodeView({
           still run through the provider-specific commands.
         </span>
       </div>
+      <section className="panel update-panel">
+        <div className="panel-heading">
+          <div>
+            <span className="eyebrow">SIGNED DELIVERY</span>
+            <h3>Desktop updates</h3>
+          </div>
+          <span className="pending-badge">
+            {updateStatus.phase === "available"
+              ? `v${updateStatus.version}`
+              : updateStatus.phase === "downloading"
+                ? "Downloading"
+                : updateStatus.phase === "installed"
+                  ? "Installed"
+                  : updateStatus.phase === "current"
+                    ? "Current"
+                    : updateStatus.phase === "checking"
+                      ? "Checking"
+                      : updateStatus.phase === "error"
+                        ? "Attention"
+                        : "Ready"}
+          </span>
+        </div>
+        <div className="update-panel-body">
+          <div>
+            <strong>
+              {updateStatus.phase === "available"
+                ? `Version ${updateStatus.version} is ready`
+                : updateStatus.phase === "downloading"
+                  ? `Installing version ${updateStatus.version}`
+                  : updateStatus.phase === "installed"
+                    ? `Version ${updateStatus.version} installed`
+                    : updateStatus.phase === "current"
+                      ? "You have the latest release"
+                      : updateStatus.phase === "error"
+                        ? "Update check failed"
+                        : updateStatus.phase === "checking"
+                          ? "Checking GitHub Releases"
+                          : "Background checks are enabled"}
+            </strong>
+            <span>
+              {updateStatus.phase === "available"
+                ? updateStatus.notes || "Review and install the signed release."
+                : updateStatus.phase === "downloading"
+                  ? "The package signature is verified before installation."
+                  : updateStatus.phase === "installed"
+                    ? "Restarting OSCIRIS Node to complete the update."
+                    : updateStatus.phase === "error"
+                      ? updateStatus.message
+                      : "OSCIRIS checks asynchronously. Downloads and installation require your approval."}
+            </span>
+          </div>
+          {updateProgress === null ? null : (
+            <div
+              aria-label={`Update download ${Math.round(updateProgress)}%`}
+              aria-valuemax={100}
+              aria-valuemin={0}
+              aria-valuenow={Math.round(updateProgress)}
+              className="update-progress"
+              role="progressbar"
+            >
+              <span style={{ width: `${updateProgress}%` }} />
+            </div>
+          )}
+          <div className="composer-actions">
+            {updateStatus.phase === "available" ? (
+              <button
+                className="primary-button"
+                onClick={onInstallUpdate}
+                type="button"
+              >
+                Download and install
+              </button>
+            ) : (
+              <button
+                className="secondary-button"
+                disabled={
+                  updateStatus.phase === "checking" ||
+                  updateStatus.phase === "downloading" ||
+                  updateStatus.phase === "installed"
+                }
+                onClick={onCheckForUpdate}
+                type="button"
+              >
+                {updateStatus.phase === "checking"
+                  ? "Checking…"
+                  : "Check for updates"}
+              </button>
+            )}
+          </div>
+        </div>
+      </section>
       <form className="panel network-control-panel" onSubmit={startNetwork}>
         <div className="panel-heading">
           <div>

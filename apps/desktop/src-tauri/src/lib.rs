@@ -7,10 +7,9 @@ use std::{
 
 use osciris_daemon::{
     default_state_dir, CreateJobInput, DaemonClient, DaemonStatus, DesktopJob,
-    EvidenceIngestionInput, InferencePromptInput, InferencePromptResult,
-    NetworkControlInput, NetworkControlResult, UnsignedTokenTransfer,
-    VerificationReceiptImportInput, WalletConfigInput, WalletStatus, WithdrawalInput,
-    WorkspaceSnapshot,
+    EvidenceIngestionInput, InferencePromptInput, InferencePromptResult, NetworkControlInput,
+    NetworkControlResult, UnsignedTokenTransfer, VerificationReceiptImportInput, WalletConfigInput,
+    WalletStatus, WithdrawalInput, WorkspaceSnapshot,
 };
 
 #[tauri::command]
@@ -214,6 +213,8 @@ fn resolve_daemon_binary() -> Option<PathBuf> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             configure_wallet,
             create_job,

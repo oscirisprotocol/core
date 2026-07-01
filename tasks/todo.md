@@ -1,5 +1,62 @@
 # Task Plan
 
+## Signed Desktop Self-Updates
+
+### Objective
+
+Allow installed OSCIRIS Node desktop clients to check for a newer GitHub
+Release, download a signed update, verify it locally, install it with explicit
+operator approval, and relaunch. Never publish updater metadata before every
+referenced platform asset and signature exists.
+
+### Security Boundary
+
+- Updates are accepted only when their Tauri signature verifies against the
+  public key compiled into the application.
+- The updater signing private key never enters the repository or release
+  artifacts; GitHub Actions receives it only through repository secrets.
+- Update checks may run asynchronously, but installation remains an explicit
+  operator action.
+- Normal branch/PR builds continue without signing credentials.
+- Tagged release publication fails closed when updater signing credentials are
+  absent or any expected update artifact is missing.
+
+### Checklist
+
+- [x] Add Tauri updater/process plugins and least-privilege capabilities
+- [x] Add desktop update state, check, progress, install, and relaunch UI
+- [x] Add signed updater artifact generation for tagged releases
+- [x] Generate `latest.json` only after all platform artifacts are present
+- [x] Document signing-key provisioning and rotation boundary
+- [x] Verify frontend, Rust, package, and workflow behavior
+
+### Review
+
+- Added background update checks plus a manual Local Node control. New versions
+  are presented to the operator; download/install is never silent.
+- Added Tauri updater and process plugins with only updater commands and process
+  restart exposed to the main window.
+- Generated an OSCIRIS updater keypair, stored it as the GitHub
+  `TAURI_SIGNING_PRIVATE_KEY` repository secret, preserved a mode-`600` offline
+  copy outside the repository, and embedded the matching public key.
+- Tagged releases now build signed updater bundles for macOS arm64, Linux x64,
+  and Windows x64. Branch and PR builds remain unsigned.
+- Added fail-closed staging and static-manifest scripts. Publication requires
+  one bundle/signature per platform and a tag matching the compiled Tauri
+  version.
+- Signed `v0.x` releases are GitHub latest releases so the static
+  `/releases/latest/download/latest.json` endpoint resolves.
+- Verification passed:
+  - `cargo test --locked` (84 passed, 1 network test ignored)
+  - desktop `cargo clippy --locked --all-targets -- -D warnings`
+  - `pnpm build`
+  - `pnpm audit --prod` (no known vulnerabilities)
+  - unsigned `pnpm tauri build` emitted `.app` and `.dmg`
+  - signed local updater build emitted `.app.tar.gz` and `.sig`
+  - updater staging and `latest.json` fixture tests
+  - release workflow YAML parse
+  - 860x620 responsive preview with no horizontal overflow
+
 ## Interactive Remote Inference Transport
 
 ### Objective

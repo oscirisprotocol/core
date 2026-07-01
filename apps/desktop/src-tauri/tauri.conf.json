@@ -28,6 +28,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": false,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -45,6 +46,14 @@
     "resources": {
       "../../../LICENSE": "LICENSE",
       "../../../NOTICE": "NOTICE"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEMwRDkzNTRGMTBGQTk0Q0QKUldUTmxQb1FUelhad0VHcGlyZ2hJMDFlZldvV2RUcDR2NkRGQmt2dk0vT3JCTmRndVNvSGZjem4K",
+      "endpoints": [
+        "https://github.com/oscirisprotocol/core/releases/latest/download/latest.json"
+      ]
     }
   }
 }

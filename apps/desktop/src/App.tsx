@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import {
   configureWallet,
   createJob,
@@ -31,6 +33,7 @@ import {
 } from "./lib/daemon";
 import {
   EvidenceView,
+  type DesktopUpdateStatus,
   InferenceView,
   JobDetailView,
   JobsView,
@@ -91,6 +94,10 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [withdrawal, setWithdrawal] =
     useState<UnsignedTokenTransfer | null>(null);
+  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<DesktopUpdateStatus>({
+    phase: "idle",
+  });
 
   async function refreshAll(showError = false) {
     try {
@@ -155,6 +162,74 @@ export default function App() {
     const timer = window.setInterval(() => void refreshAll(), 8_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void checkForUpdate(false), 1_500);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  async function checkForUpdate(manual = true) {
+    setUpdateStatus({ phase: "checking" });
+    try {
+      const update = await check({ timeout: 20_000 });
+      setPendingUpdate(update);
+      setUpdateStatus(
+        update
+          ? {
+              phase: "available",
+              version: update.version,
+              notes: update.body ?? null,
+            }
+          : { phase: "current" },
+      );
+    } catch (updateError) {
+      if (manual) {
+        setUpdateStatus({
+          phase: "error",
+          message: String(updateError),
+        });
+      } else {
+        setUpdateStatus({ phase: "idle" });
+      }
+    }
+  }
+
+  async function installUpdate() {
+    if (!pendingUpdate) return;
+    setUpdateStatus({
+      phase: "downloading",
+      version: pendingUpdate.version,
+      downloaded: 0,
+      total: null,
+    });
+    let downloaded = 0;
+    let total: number | null = null;
+    try {
+      await pendingUpdate.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          total = event.data.contentLength ?? null;
+        } else if (event.event === "Progress") {
+          downloaded += event.data.chunkLength;
+        }
+        setUpdateStatus({
+          phase: "downloading",
+          version: pendingUpdate.version,
+          downloaded,
+          total,
+        });
+      });
+      setUpdateStatus({
+        phase: "installed",
+        version: pendingUpdate.version,
+      });
+      await relaunch();
+    } catch (updateError) {
+      setUpdateStatus({
+        phase: "error",
+        message: String(updateError),
+      });
+    }
+  }
 
   async function runAction<T>(action: () => Promise<T>, after?: (value: T) => void) {
     setBusy(true);
@@ -333,6 +408,22 @@ export default function App() {
           </div>
         ) : null}
 
+        {updateStatus.phase === "available" ? (
+          <section className="update-strip" aria-live="polite">
+            <div>
+              <strong>OSCIRIS Node {updateStatus.version} is available</strong>
+              <span>Signed release verified before installation.</span>
+            </div>
+            <button
+              className="compact-primary"
+              onClick={() => void installUpdate()}
+              type="button"
+            >
+              Install update
+            </button>
+          </section>
+        ) : null}
+
         {!daemonLive && view !== "node" ? (
           <section className="offline-strip">
             <div>
@@ -434,6 +525,9 @@ export default function App() {
               }
               onStartNetwork={(input) => void handleNetworkStart(input)}
               onStopNetwork={() => void handleNetworkStop()}
+              updateStatus={updateStatus}
+              onCheckForUpdate={() => void checkForUpdate()}
+              onInstallUpdate={() => void installUpdate()}
             />
           )}
         </div>

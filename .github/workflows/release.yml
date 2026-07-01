@@ -81,10 +81,13 @@ jobs:
         include:
           - os: macos-14
             platform: desktop-macos-aarch64
+            update_platform: darwin-aarch64
           - os: ubuntu-latest
             platform: desktop-linux-x86_64
+            update_platform: linux-x86_64
           - os: windows-latest
             platform: desktop-windows-x86_64
+            update_platform: windows-x86_64
 
     defaults:
       run:
@@ -132,7 +135,23 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build desktop installer
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: pnpm tauri build
+
+      - name: Build signed desktop updater
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: pnpm tauri build --config src-tauri/tauri.updater.conf.json
+
+      - name: Stage signed updater assets
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: >-
+          node scripts/stage-updater-assets.mjs
+          --platform ${{ matrix.update_platform }}
+          --bundle-root src-tauri/target/release/bundle
+          --output update-assets
 
       - name: Upload desktop installers
         uses: actions/upload-artifact@v4
@@ -145,13 +164,14 @@ jobs:
             apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
             apps/desktop/src-tauri/target/release/bundle/msi/*.msi
             apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+            apps/desktop/update-assets/*
 
   release:
     name: Publish GitHub Release
     needs:
       - build
       - desktop-installers
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -179,11 +199,22 @@ jobs:
             --asset "linux-x86_64=${PWD}/release-binaries/linux-x86_64/osciris-node" \
             --asset "windows-x86_64=${PWD}/release-binaries/windows-x86_64/osciris-node.exe"
 
+      - name: Generate signed desktop update manifest
+        run: >-
+          node scripts/generate_desktop_update_manifest.mjs
+          --version "${GITHUB_REF_NAME#v}"
+          --tag "$GITHUB_REF_NAME"
+          --repository "$GITHUB_REPOSITORY"
+          --input release-binaries
+          --output dist/desktop-update
+          --tauri-config apps/desktop/src-tauri/tauri.conf.json
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          prerelease: true
+          make_latest: true
+          prerelease: false
           files: |
             dist/beta-release/osciris-node-macos-aarch64.tar.gz
             dist/beta-release/osciris-node-linux-x86_64.tar.gz
@@ -194,3 +225,7 @@ jobs:
             release-binaries/desktop-linux-x86_64/**/*.AppImage
             release-binaries/desktop-windows-x86_64/**/*.msi
             release-binaries/desktop-windows-x86_64/**/*.exe
+            dist/desktop-update/osciris-node-darwin-aarch64.app.tar.gz
+            dist/desktop-update/osciris-node-linux-x86_64.AppImage
+            dist/desktop-update/osciris-node-windows-x86_64-setup.exe
+            dist/desktop-update/latest.json

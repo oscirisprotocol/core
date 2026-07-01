@@ -1,5 +1,11 @@
 # Lessons
 
+- Passwordless Tauri updater keys still require
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""` in non-interactive release jobs;
+  omitting the variable causes a password prompt and CI failure.
+- GitHub `/releases/latest` excludes prereleases. A desktop updater using that
+  static redirect must publish its signed update as the latest release or use a
+  different channel endpoint.
 - When a public manifest controls installer update behavior, do not publish it
   automatically unless the referenced release assets have already been verified
   as reachable and consistent.

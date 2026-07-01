@@ -409,6 +409,7 @@ main {
 
 .offline-strip,
 .error-banner,
+.update-strip,
 .boundary-callout {
   display: flex;
   align-items: center;
@@ -422,18 +423,27 @@ main {
 }
 
 .offline-strip > div,
+.update-strip > div,
 .error-banner {
   font-size: 10px;
 }
 
-.offline-strip > div {
+.offline-strip > div,
+.update-strip > div {
   display: grid;
   gap: 3px;
 }
 
 .offline-strip span,
+.update-strip span,
 .boundary-callout span {
   color: var(--body);
+}
+
+.update-strip {
+  border-color: #b8ded9;
+  background:
+    linear-gradient(110deg, rgba(255, 255, 255, 0.92), rgba(231, 248, 244, 0.96));
 }
 
 .error-banner {
@@ -1722,6 +1732,50 @@ select:focus {
 
 .workspace-section > .boundary-callout {
   margin-inline: 0;
+}
+
+.update-panel,
+.network-control-panel {
+  margin-top: 16px;
+}
+
+.update-panel-body {
+  padding: 20px 21px 0;
+}
+
+.update-panel-body > div:first-child {
+  display: grid;
+  gap: 6px;
+}
+
+.update-panel-body strong {
+  font-size: 11px;
+}
+
+.update-panel-body span {
+  color: var(--body);
+  font-size: 9px;
+  line-height: 1.65;
+}
+
+.update-panel-body .composer-actions {
+  padding-inline: 0;
+}
+
+.update-progress {
+  overflow: hidden;
+  height: 5px;
+  border-radius: 999px;
+  margin-top: 15px;
+  background: #dce9e7;
+}
+
+.update-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+  transition: width 180ms ease-out;
 }
 
 .app-footer {
