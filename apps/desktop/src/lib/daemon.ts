@@ -111,6 +111,7 @@ export interface WalletStatus {
 export interface WorkspaceSnapshot {
   jobs: DesktopJob[];
   wallet: WalletStatus;
+  protocol_announcement_count: number;
 }
 
 export interface WithdrawalInput {
@@ -151,6 +152,10 @@ export function createJob(input: CreateJobInput): Promise<DesktopJob> {
 
 export function submitJob(jobId: string): Promise<DesktopJob> {
   return invoke<DesktopJob>("submit_job", { jobId });
+}
+
+export function publishJob(jobId: string): Promise<DesktopJob> {
+  return invoke<DesktopJob>("publish_job", { jobId });
 }
 
 export function configureWallet(

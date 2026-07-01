@@ -8,6 +8,7 @@ import {
   getWorkspace,
   launchDaemon,
   prepareWithdrawal,
+  publishJob,
   refreshWallet,
   setParticipation,
   submitJob,
@@ -261,6 +262,9 @@ export default function App() {
               onBack={() => setSelectedJobId(null)}
               onSubmit={(jobId) =>
                 void runAction(() => submitJob(jobId), () => setSelectedJobId(jobId))
+              }
+              onPublish={(jobId) =>
+                void runAction(() => publishJob(jobId), () => setSelectedJobId(jobId))
               }
               busy={busy}
             />

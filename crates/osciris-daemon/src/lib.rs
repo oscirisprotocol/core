@@ -13,7 +13,10 @@ use std::{
 use alloy_primitives::{Address, U256};
 use anyhow::{anyhow, bail, Context, Result};
 use atomic_write_file::AtomicWriteFile;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
 use rand::{rngs::OsRng, RngCore};
@@ -25,6 +28,12 @@ use tokio::{
     sync::RwLock,
 };
 use tokio_util::codec::{Framed, LinesCodec};
+
+use osciris_core::{
+    load_signing_key_from_base64_seed, sign_job_announcement, verifying_key_to_base64,
+    JobAnnouncement, JobSpec, JobType, PrivacyMode, PrivacyPolicy,
+};
+use osciris_node::store::ProtocolStore;
 
 pub const API_VERSION: u16 = 1;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -159,6 +168,7 @@ pub enum DaemonCommand {
     SetParticipation { enabled: bool },
     CreateJob { input: CreateJobInput },
     SubmitJob { job_id: String },
+    PublishJob { job_id: String },
     ConfigureWallet { input: WalletConfigInput },
     RefreshWallet,
     PrepareWithdrawal { input: WithdrawalInput },
@@ -384,6 +394,7 @@ pub struct UnsignedTokenTransfer {
 pub struct WorkspaceSnapshot {
     pub jobs: Vec<DesktopJob>,
     pub wallet: WalletStatus,
+    pub protocol_announcement_count: u32,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -406,6 +417,7 @@ struct DaemonServiceInner {
     auth_token: String,
     state: RwLock<PersistedState>,
     http: reqwest::Client,
+    protocol_identity: ed25519_dalek::SigningKey,
 }
 
 impl DaemonService {
@@ -413,6 +425,7 @@ impl DaemonService {
         secure_state_dir(&state_dir)?;
         let state = load_state(&state_dir)?;
         let auth_token = ensure_auth_token(&state_dir)?;
+        let protocol_identity = load_or_create_protocol_identity(&state_dir)?;
         let http = reqwest::Client::builder()
             .https_only(true)
             .timeout(Duration::from_secs(6))
@@ -425,6 +438,7 @@ impl DaemonService {
                 auth_token,
                 state: RwLock::new(state),
                 http,
+                protocol_identity,
             }),
         })
     }
@@ -496,6 +510,14 @@ impl DaemonService {
                 Err(error) => DaemonResponse::error(
                     request.request_id,
                     "job_submit_failed",
+                    error.to_string(),
+                ),
+            },
+            DaemonCommand::PublishJob { job_id } => match self.publish_job(&job_id).await {
+                Ok(job) => DaemonResponse::success(request.request_id, DaemonResult::Job(job)),
+                Err(error) => DaemonResponse::error(
+                    request.request_id,
+                    "job_publish_failed",
                     error.to_string(),
                 ),
             },
@@ -572,6 +594,11 @@ impl DaemonService {
                 .wallet_status
                 .clone()
                 .unwrap_or_else(|| wallet_status(None, &state.jobs)),
+            protocol_announcement_count: state
+                .jobs
+                .iter()
+                .filter(|job| job.state != DesktopJobState::Draft)
+                .count() as u32,
         }
     }
 
@@ -623,6 +650,44 @@ impl DaemonService {
         job.updated_at = Utc::now().to_rfc3339();
         let job = job.clone();
         update_wallet_commitment(&mut state);
+        persist_state(&self.inner.state_dir, &state)?;
+        Ok(job)
+    }
+
+    async fn publish_job(&self, job_id: &str) -> Result<DesktopJob> {
+        let job = {
+            let state = self.inner.state.read().await;
+            state
+                .jobs
+                .iter()
+                .find(|job| job.job_id == job_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("job {job_id} was not found"))?
+        };
+        if job.state != DesktopJobState::AwaitingFunding {
+            bail!("only jobs in funding review can be published");
+        }
+
+        let announcement = desktop_job_to_announcement(&job, &self.inner.protocol_identity)?;
+        let protocol_store = ProtocolStore::open(&self.inner.state_dir.join("protocol"))
+            .await
+            .context("open daemon protocol store")?;
+        protocol_store
+            .record_job_announcement(&announcement)
+            .await
+            .context("record desktop job announcement")?;
+        let mut state = self.inner.state.write().await;
+        let job = state
+            .jobs
+            .iter_mut()
+            .find(|candidate| candidate.job_id == job_id)
+            .ok_or_else(|| anyhow!("job {job_id} was not found"))?;
+        job.state = DesktopJobState::Queued;
+        job.provider_node_id = None;
+        job.progress_percent = 25;
+        job.evidence.chain_tx_hash = Some("local_protocol_pending".to_string());
+        job.updated_at = Utc::now().to_rfc3339();
+        let job = job.clone();
         persist_state(&self.inner.state_dir, &state)?;
         Ok(job)
     }
@@ -940,6 +1005,13 @@ impl DaemonClient {
         }
     }
 
+    pub async fn publish_job(&self, job_id: String) -> Result<DesktopJob> {
+        match self.send(DaemonCommand::PublishJob { job_id }).await? {
+            DaemonResult::Job(job) => Ok(job),
+            result => bail!("unexpected daemon result: {result:?}"),
+        }
+    }
+
     pub async fn configure_wallet(&self, input: WalletConfigInput) -> Result<WalletStatus> {
         match self.send(DaemonCommand::ConfigureWallet { input }).await? {
             DaemonResult::Wallet(wallet) => Ok(wallet),
@@ -1045,6 +1117,10 @@ fn auth_token_path(state_dir: &Path) -> PathBuf {
     state_dir.join("daemon-auth-token")
 }
 
+fn protocol_identity_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("protocol-ed25519-seed")
+}
+
 fn ensure_auth_token(state_dir: &Path) -> Result<String> {
     let path = auth_token_path(state_dir);
     if path.exists() {
@@ -1078,6 +1154,44 @@ fn ensure_auth_token(state_dir: &Path) -> Result<String> {
         .with_context(|| format!("sync daemon credential {}", path.display()))?;
     secure_private_file(&path)?;
     Ok(token)
+}
+
+fn load_or_create_protocol_identity(state_dir: &Path) -> Result<ed25519_dalek::SigningKey> {
+    let path = protocol_identity_path(state_dir);
+    if path.exists() {
+        secure_private_file(&path)?;
+        let seed = std::fs::read_to_string(&path)
+            .with_context(|| format!("read daemon protocol identity {}", path.display()))?;
+        return load_signing_key_from_base64_seed(seed.trim())
+            .context("decode daemon protocol identity");
+    }
+
+    let mut bytes = [0_u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let seed = STANDARD.encode(bytes);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = match options.open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return load_or_create_protocol_identity(state_dir);
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("create daemon protocol identity {}", path.display()));
+        }
+    };
+    file.write_all(seed.as_bytes())
+        .with_context(|| format!("write daemon protocol identity {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("sync daemon protocol identity {}", path.display()))?;
+    secure_private_file(&path)?;
+    load_signing_key_from_base64_seed(&seed).context("decode new daemon protocol identity")
 }
 
 fn read_auth_token(state_dir: &Path) -> Result<String> {
@@ -1121,6 +1235,85 @@ fn secure_private_file(path: &Path) -> Result<()> {
             .with_context(|| format!("secure private file {}", path.display()))?;
     }
     Ok(())
+}
+
+fn desktop_job_to_announcement(
+    job: &DesktopJob,
+    signing_key: &ed25519_dalek::SigningKey,
+) -> Result<JobAnnouncement> {
+    let job_id = uuid::Uuid::parse_str(&job.job_id).context("desktop job ID is not a UUID")?;
+    let job_type = match job.kind {
+        DesktopJobKind::Training => JobType::LlmLoraEconomics,
+        DesktopJobKind::Inference => JobType::InferenceEconomics,
+    };
+    let privacy_mode = match job.privacy_mode {
+        DesktopPrivacyMode::RawBaseline => PrivacyMode::RawBaseline,
+        DesktopPrivacyMode::DspPrepared => PrivacyMode::DspPrepared,
+        DesktopPrivacyMode::DpModelRelease => PrivacyMode::DpModelRelease,
+    };
+    let job_spec = JobSpec {
+        job_id,
+        job_type: job_type.clone(),
+        dataset: Some(job.workload.clone()),
+        model_id: Some(job.model_id.clone()),
+        command: default_protocol_command(&job_type).to_string(),
+        args: vec!["--desktop-workload".to_string(), job.workload.clone()],
+        privacy_policy: PrivacyPolicy {
+            privacy_mode: privacy_mode.clone(),
+            release_object: match job_type {
+                JobType::LlmLoraEconomics => "model",
+                JobType::InferenceEconomics => "inference_output",
+                JobType::ProductionProof => "evidence_bundle",
+            }
+            .to_string(),
+            formal_dp_claim: matches!(job.privacy_mode, DesktopPrivacyMode::DpModelRelease),
+            sensitive_field_policy: "desktop_configured_guard".to_string(),
+            evidence_profile: "desktop_protocol_submission".to_string(),
+        },
+        required_verifier_count: job.required_verifier_count,
+        challenge_window_seconds: job.challenge_window_seconds,
+        payment_token: "USDC_TEST".to_string(),
+        escrow_amount_atomic: job.budget_usdc_micros.to_string(),
+        created_at: job.created_at.clone(),
+    };
+    let mut announcement = JobAnnouncement {
+        job_id,
+        job_spec: job_spec.clone(),
+        submitter_node_id: "desktop-workspace".to_string(),
+        submitter_ed25519_public_key_base64: verifying_key_to_base64(&signing_key.verifying_key()),
+        job_type,
+        privacy_mode,
+        required_capability: desktop_required_capability(&job.hardware_profile),
+        estimated_runtime_class: "desktop_requested".to_string(),
+        payment_token: job_spec.payment_token.clone(),
+        escrow_amount_atomic: job_spec.escrow_amount_atomic.clone(),
+        required_verifier_count: job.required_verifier_count,
+        announced_at: Utc::now().to_rfc3339(),
+        signature: String::new(),
+    };
+    announcement.signature = sign_job_announcement(&announcement, signing_key)?;
+    Ok(announcement)
+}
+
+fn default_protocol_command(job_type: &JobType) -> &'static str {
+    match job_type {
+        JobType::LlmLoraEconomics => "uv run osciris llm-lora-economics",
+        JobType::InferenceEconomics => "uv run osciris inference-economics",
+        JobType::ProductionProof => "uv run osciris production-proof",
+    }
+}
+
+fn desktop_required_capability(profile: &str) -> String {
+    let normalized = profile.trim().to_ascii_lowercase();
+    if normalized.contains("24") {
+        "gpu>=24gb".to_string()
+    } else if normalized.contains("16") {
+        "gpu>=16gb".to_string()
+    } else if normalized.is_empty() || normalized == "any" {
+        "any".to_string()
+    } else {
+        normalized
+    }
 }
 
 fn validate_job_input(input: &CreateJobInput) -> Result<()> {
@@ -1295,6 +1488,32 @@ mod tests {
         assert_eq!(workspace.jobs.len(), 1);
         assert_eq!(workspace.jobs[0].state, DesktopJobState::AwaitingFunding);
         assert_eq!(workspace.wallet.committed_usdc_micros, 5_000_000);
+    }
+
+    #[tokio::test]
+    async fn publish_job_records_protocol_announcement() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DaemonService::new(directory.path().to_path_buf()).unwrap();
+        let job = service.create_job(valid_job_input()).await.unwrap();
+        service.submit_job(&job.job_id).await.unwrap();
+        let published = service.publish_job(&job.job_id).await.unwrap();
+        assert_eq!(published.state, DesktopJobState::Queued);
+        assert_eq!(published.progress_percent, 25);
+
+        let store = ProtocolStore::open(&directory.path().join("protocol"))
+            .await
+            .unwrap();
+        let announcement = store
+            .load_job_announcement(&job.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(announcement.job_id.to_string(), job.job_id);
+        assert_eq!(announcement.job_type, JobType::InferenceEconomics);
+        assert_eq!(announcement.required_capability, "gpu>=24gb");
+
+        let workspace = service.workspace().await;
+        assert_eq!(workspace.protocol_announcement_count, 1);
     }
 
     #[test]

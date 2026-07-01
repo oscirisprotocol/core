@@ -51,6 +51,14 @@ async fn submit_job(job_id: String) -> Result<DesktopJob, String> {
 }
 
 #[tauri::command]
+async fn publish_job(job_id: String) -> Result<DesktopJob, String> {
+    DaemonClient::default_for_user()
+        .publish_job(job_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn configure_wallet(input: WalletConfigInput) -> Result<WalletStatus, String> {
     DaemonClient::default_for_user()
         .configure_wallet(input)
@@ -150,6 +158,7 @@ pub fn run() {
             daemon_status,
             launch_daemon,
             prepare_withdrawal,
+            publish_job,
             refresh_wallet,
             set_participation,
             submit_job,

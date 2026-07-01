@@ -552,11 +552,13 @@ export function JobDetailView({
   busy,
   onBack,
   onSubmit,
+  onPublish,
 }: {
   job: DesktopJob;
   busy: boolean;
   onBack: () => void;
   onSubmit: (jobId: string) => void;
+  onPublish: (jobId: string) => void;
 }) {
   const current = lifecycle.indexOf(job.state);
   return (
@@ -575,6 +577,16 @@ export function JobDetailView({
               type="button"
             >
               Send to funding review
+            </button>
+          ) : null}
+          {job.state === "awaiting_funding" ? (
+            <button
+              className="primary-button"
+              disabled={busy}
+              onClick={() => onPublish(job.job_id)}
+              type="button"
+            >
+              Publish protocol job
             </button>
           ) : null}
         </div>
@@ -620,10 +632,11 @@ export function JobDetailView({
         </div>
         {job.state === "awaiting_funding" ? (
           <div className="boundary-callout warning">
-            <strong>Funding is not broadcast yet</strong>
+            <strong>Ready to publish protocol announcement</strong>
             <span>
-              ERC-20 escrow is gated until the protocol contract path supports
-              non-native payment tokens.
+              Publishing records a signed local job announcement for provider
+              matching. External wallet funding and network execution remain
+              separate steps.
             </span>
           </div>
         ) : null}

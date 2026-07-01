@@ -1,5 +1,53 @@
 # Task Plan
 
+## Desktop Protocol Publication Bridge
+
+### Objective
+
+Expose the first real backend protocol flow through the desktop daemon: a
+desktop job can move beyond local funding review into a signed local protocol
+announcement that provider matching can consume.
+
+### Spec
+
+- Keep the desktop non-custodial: no EVM private keys or seed phrases enter the
+  UI or daemon.
+- Generate and persist a daemon-local Ed25519 protocol identity for signing
+  job announcements.
+- Convert desktop training/inference jobs into `osciris-core` `JobSpec` and
+  signed `JobAnnouncement` records.
+- Store protocol announcements in the daemon-owned local `ProtocolStore`.
+- Expose a Tauri/Desktop action that publishes a funding-review job into the
+  protocol queue.
+- Do not claim provider execution is desktop-driven until assignment,
+  execution, and receipt ingestion are all exposed through daemon APIs.
+
+### Checklist
+
+- [x] Add daemon protocol-store and signing dependencies
+- [x] Add daemon-local protocol identity persistence
+- [x] Convert desktop jobs into signed protocol announcements
+- [x] Add daemon and Tauri `publish_job` command path
+- [x] Add desktop UI action for funding-review jobs
+- [x] Verify daemon tests, desktop build, and native Tauri bundle
+- [ ] Commit and push
+
+### Review
+
+- Added a daemon-local Ed25519 identity stored under the daemon state directory
+  as `protocol-ed25519-seed`.
+- Added `publish_job`, which records a signed `JobAnnouncement` in the daemon's
+  local `ProtocolStore` and advances the desktop job to `queued`.
+- Added Tauri and TypeScript bindings for `publish_job`.
+- Updated the desktop detail view so draft jobs move to funding review, then
+  funding-review jobs can publish a protocol announcement.
+- Verified:
+  - `cargo test -p osciris-daemon publish_job_records_protocol_announcement --locked`
+  - `cargo test -p osciris-daemon --locked`
+  - `cargo clippy -p osciris-daemon --locked --all-targets -- -D warnings`
+  - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop tauri build`
+
 ## Real Receipt Ingestion
 
 ### Objective
