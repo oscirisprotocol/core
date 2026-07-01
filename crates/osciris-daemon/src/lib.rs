@@ -33,9 +33,10 @@ use osciris_core::{
     bundle_hash, load_signing_key_from_base64_seed, sha256_file, sign_job_announcement,
     sign_job_assignment, verify_execution_receipt_signature, verify_job_announcement_signature,
     verify_job_claim_signature, verify_provider_capability_signature,
-    verify_receipt_availability_signature, verifying_key_from_base64, verifying_key_to_base64,
-    ExecutionReceipt, JobAnnouncement, JobAssignment, JobClaim, JobSpec, JobType, NodeStatus,
-    PrivacyMode, PrivacyPolicy, ProviderCapability, ReceiptAvailability, ReceiptBundle,
+    verify_receipt_availability_signature, verify_verification_receipt_signature,
+    verifying_key_from_base64, verifying_key_to_base64, ExecutionReceipt, JobAnnouncement,
+    JobAssignment, JobClaim, JobSpec, JobType, NodeStatus, PrivacyMode, PrivacyPolicy,
+    ProviderCapability, ReceiptAvailability, ReceiptBundle, VerificationReceiptAnnouncement,
 };
 use osciris_node::network::job_matches_provider_capability;
 use osciris_node::status::calculate_quorum_status;
@@ -171,16 +172,35 @@ pub enum DaemonCommand {
     Ping,
     GetStatus,
     GetWorkspace,
-    SetParticipation { enabled: bool },
-    CreateJob { input: CreateJobInput },
-    SubmitJob { job_id: String },
-    PublishJob { job_id: String },
-    MatchProvider { job_id: String },
+    SetParticipation {
+        enabled: bool,
+    },
+    CreateJob {
+        input: CreateJobInput,
+    },
+    SubmitJob {
+        job_id: String,
+    },
+    PublishJob {
+        job_id: String,
+    },
+    MatchProvider {
+        job_id: String,
+    },
     RefreshProtocolJobs,
-    IngestEvidence { input: EvidenceIngestionInput },
-    ConfigureWallet { input: WalletConfigInput },
+    IngestEvidence {
+        input: EvidenceIngestionInput,
+    },
+    ImportVerificationReceipt {
+        input: VerificationReceiptImportInput,
+    },
+    ConfigureWallet {
+        input: WalletConfigInput,
+    },
     RefreshWallet,
-    PrepareWithdrawal { input: WithdrawalInput },
+    PrepareWithdrawal {
+        input: WithdrawalInput,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -406,6 +426,12 @@ pub struct EvidenceIngestionInput {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationReceiptImportInput {
+    pub job_id: String,
+    pub receipt_json_path: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceSnapshot {
     pub jobs: Vec<DesktopJob>,
     pub wallet: WalletStatus,
@@ -566,6 +592,19 @@ impl DaemonService {
                     error.to_string(),
                 ),
             },
+            DaemonCommand::ImportVerificationReceipt { input } => {
+                match self.import_verification_receipt(input).await {
+                    Ok(workspace) => DaemonResponse::success(
+                        request.request_id,
+                        DaemonResult::Workspace(workspace),
+                    ),
+                    Err(error) => DaemonResponse::error(
+                        request.request_id,
+                        "verification_receipt_import_failed",
+                        error.to_string(),
+                    ),
+                }
+            }
             DaemonCommand::ConfigureWallet { input } => match self.configure_wallet(input).await {
                 Ok(wallet) => {
                     DaemonResponse::success(request.request_id, DaemonResult::Wallet(wallet))
@@ -931,6 +970,52 @@ impl DaemonService {
         self.refresh_protocol_jobs().await
     }
 
+    async fn import_verification_receipt(
+        &self,
+        input: VerificationReceiptImportInput,
+    ) -> Result<WorkspaceSnapshot> {
+        let receipt_path = PathBuf::from(input.receipt_json_path);
+        if !receipt_path.is_file() {
+            bail!(
+                "verification receipt file {} does not exist",
+                receipt_path.display()
+            );
+        }
+        let announcement: VerificationReceiptAnnouncement = serde_json::from_slice(
+            &fs::read(&receipt_path)
+                .with_context(|| format!("failed to read {}", receipt_path.display()))?,
+        )
+        .context("decode verification receipt announcement")?;
+        if announcement.verification_receipt.job_id.to_string() != input.job_id {
+            bail!(
+                "verification receipt job_id {} does not match requested job_id {}",
+                announcement.verification_receipt.job_id,
+                input.job_id
+            );
+        }
+        if announcement.verification_receipt.verifier_id != announcement.verifier_node_id {
+            bail!(
+                "verification receipt verifier_id {} does not match announcement verifier {}",
+                announcement.verification_receipt.verifier_id,
+                announcement.verifier_node_id
+            );
+        }
+        let verifier_key =
+            verifying_key_from_base64(&announcement.verifier_ed25519_public_key_base64)
+                .context("decode verifier public key")?;
+        verify_verification_receipt_signature(&announcement.verification_receipt, &verifier_key)
+            .context("verification receipt signature invalid")?;
+
+        let protocol_store = ProtocolStore::open(&self.inner.state_dir.join("protocol"))
+            .await
+            .context("open daemon protocol store")?;
+        protocol_store
+            .record_verification_receipt(&announcement.verification_receipt)
+            .await
+            .context("record verification receipt")?;
+        self.refresh_protocol_jobs().await
+    }
+
     async fn configure_wallet(&self, input: WalletConfigInput) -> Result<WalletStatus> {
         let address = normalize_nonzero_address(&input.address)?;
         let settlement_token_address = input
@@ -1270,6 +1355,19 @@ impl DaemonClient {
         input: EvidenceIngestionInput,
     ) -> Result<WorkspaceSnapshot> {
         match self.send(DaemonCommand::IngestEvidence { input }).await? {
+            DaemonResult::Workspace(workspace) => Ok(workspace),
+            result => bail!("unexpected daemon result: {result:?}"),
+        }
+    }
+
+    pub async fn import_verification_receipt(
+        &self,
+        input: VerificationReceiptImportInput,
+    ) -> Result<WorkspaceSnapshot> {
+        match self
+            .send(DaemonCommand::ImportVerificationReceipt { input })
+            .await?
+        {
             DaemonResult::Workspace(workspace) => Ok(workspace),
             result => bail!("unexpected daemon result: {result:?}"),
         }
@@ -1884,8 +1982,9 @@ mod tests {
     use super::*;
     use osciris_core::{
         canonical_json_sha256, sign_execution_receipt, sign_job_claim, sign_provider_capability,
-        sign_receipt_availability, verify_job_assignment_signature, ArtifactManifest,
-        ChainSubmissionStatus, ExecutionStatus, GpuMetadata, SHA256_ALGORITHM,
+        sign_receipt_availability, sign_verification_receipt, verify_job_assignment_signature,
+        ArtifactManifest, ChainSubmissionStatus, ExecutionStatus, GpuMetadata, VerificationChecks,
+        VerificationReceipt, VerificationStatus, SHA256_ALGORITHM,
     };
 
     fn valid_job_input() -> CreateJobInput {
@@ -1952,6 +2051,44 @@ mod tests {
         };
         claim.signature = sign_job_claim(&claim, signing_key).unwrap();
         claim
+    }
+
+    fn signed_verification_announcement(
+        verifier_id: &str,
+        signing_key: &ed25519_dalek::SigningKey,
+        job_id: uuid::Uuid,
+        receipt_id: uuid::Uuid,
+        bundle_sha256: &str,
+    ) -> VerificationReceiptAnnouncement {
+        let mut receipt = VerificationReceipt {
+            verification_receipt_id: uuid::Uuid::now_v7(),
+            receipt_id,
+            job_id,
+            verifier_id: verifier_id.to_string(),
+            verification_status: VerificationStatus::Accepted,
+            verified_at: Utc::now().to_rfc3339(),
+            checks: VerificationChecks {
+                manifest_valid: true,
+                stdout_hash_valid: true,
+                stderr_hash_valid: true,
+                artifact_root_valid: true,
+                required_metrics_present: true,
+                signature_valid: true,
+                hardware_claim_valid: true,
+            },
+            failure_reasons: vec![],
+            bundle_sha256: bundle_sha256.to_string(),
+            signature: String::new(),
+            signing_key_id: format!("{verifier_id}-key"),
+        };
+        receipt.signature = sign_verification_receipt(&receipt, signing_key).unwrap();
+        VerificationReceiptAnnouncement {
+            verifier_node_id: verifier_id.to_string(),
+            verifier_ed25519_public_key_base64: verifying_key_to_base64(
+                &signing_key.verifying_key(),
+            ),
+            verification_receipt: receipt,
+        }
     }
 
     #[test]
@@ -2274,6 +2411,71 @@ mod tests {
                 .unwrap()
                 .bundle_sha256,
             availability.bundle_sha256
+        );
+    }
+
+    #[tokio::test]
+    async fn import_verification_receipt_completes_job_after_quorum() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DaemonService::new(directory.path().to_path_buf()).unwrap();
+        let mut input = valid_job_input();
+        input.required_verifier_count = 1;
+        let job = service.create_job(input).await.unwrap();
+        service.submit_job(&job.job_id).await.unwrap();
+        service.publish_job(&job.job_id).await.unwrap();
+
+        let store = ProtocolStore::open(&directory.path().join("protocol"))
+            .await
+            .unwrap();
+        let job_id = uuid::Uuid::parse_str(&job.job_id).unwrap();
+        let bundle = ReceiptBundle {
+            bundle_id: uuid::Uuid::now_v7(),
+            job_id,
+            job_spec_sha256: "11".repeat(32),
+            execution_receipt_sha256: "22".repeat(32),
+            verification_receipt_sha256_list: vec![],
+            bundle_sha256: "33".repeat(32),
+            artifact_index_path: "bundle_index.json".to_string(),
+            chain_submission_status: ChainSubmissionStatus::Pending,
+        };
+        store.record_receipt_bundle(&bundle).await.unwrap();
+        let verifier_key = test_signing_key(8);
+        let announcement = signed_verification_announcement(
+            "verifier-a",
+            &verifier_key,
+            job_id,
+            uuid::Uuid::now_v7(),
+            &bundle.bundle_sha256,
+        );
+        let receipt_path = directory.path().join("verification_receipt.json");
+        fs::write(
+            &receipt_path,
+            serde_json::to_vec_pretty(&announcement).unwrap(),
+        )
+        .unwrap();
+
+        let refreshed = service
+            .import_verification_receipt(VerificationReceiptImportInput {
+                job_id: job.job_id.clone(),
+                receipt_json_path: receipt_path.display().to_string(),
+            })
+            .await
+            .unwrap();
+        let refreshed_job = &refreshed.jobs[0];
+        assert_eq!(refreshed_job.state, DesktopJobState::Completed);
+        assert_eq!(refreshed_job.progress_percent, 100);
+        assert_eq!(refreshed_job.evidence.verifier_count, 1);
+        assert_eq!(
+            refreshed_job.evidence.verification_status,
+            Some("accepted".to_string())
+        );
+        assert_eq!(
+            store
+                .load_verification_receipts_by_job(&job.job_id)
+                .await
+                .unwrap()
+                .len(),
+            1
         );
     }
 

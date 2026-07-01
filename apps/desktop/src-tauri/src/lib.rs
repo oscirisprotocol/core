@@ -7,8 +7,8 @@ use std::{
 
 use osciris_daemon::{
     default_state_dir, CreateJobInput, DaemonClient, DaemonStatus, DesktopJob,
-    EvidenceIngestionInput, UnsignedTokenTransfer, WalletConfigInput, WalletStatus,
-    WithdrawalInput, WorkspaceSnapshot,
+    EvidenceIngestionInput, UnsignedTokenTransfer, VerificationReceiptImportInput,
+    WalletConfigInput, WalletStatus, WithdrawalInput, WorkspaceSnapshot,
 };
 
 #[tauri::command]
@@ -79,6 +79,16 @@ async fn refresh_protocol_jobs() -> Result<WorkspaceSnapshot, String> {
 async fn ingest_evidence(input: EvidenceIngestionInput) -> Result<WorkspaceSnapshot, String> {
     DaemonClient::default_for_user()
         .ingest_evidence(input)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn import_verification_receipt(
+    input: VerificationReceiptImportInput,
+) -> Result<WorkspaceSnapshot, String> {
+    DaemonClient::default_for_user()
+        .import_verification_receipt(input)
         .await
         .map_err(|error| error.to_string())
 }
@@ -182,6 +192,7 @@ pub fn run() {
             configure_wallet,
             create_job,
             daemon_status,
+            import_verification_receipt,
             ingest_evidence,
             launch_daemon,
             match_provider,

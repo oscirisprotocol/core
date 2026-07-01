@@ -7,6 +7,7 @@ import {
   type DaemonStatus,
   getDaemonStatus,
   getWorkspace,
+  importVerificationReceipt,
   ingestEvidence,
   launchDaemon,
   matchProvider,
@@ -112,6 +113,26 @@ export default function App() {
     if (typeof selected !== "string") return;
     await runAction(
       () => ingestEvidence({ job_id: jobId, evidence_dir: selected }),
+      (nextWorkspace) => {
+        setWorkspace(nextWorkspace);
+        setSelectedJobId(jobId);
+      },
+    );
+  }
+
+  async function importJobVerificationReceipt(jobId: string) {
+    const selected = await open({
+      multiple: false,
+      title: "Select signed verification receipt announcement",
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (typeof selected !== "string") return;
+    await runAction(
+      () =>
+        importVerificationReceipt({
+          job_id: jobId,
+          receipt_json_path: selected,
+        }),
       (nextWorkspace) => {
         setWorkspace(nextWorkspace);
         setSelectedJobId(jobId);
@@ -312,6 +333,9 @@ export default function App() {
                 })
               }
               onIngestEvidence={(jobId) => void ingestJobEvidence(jobId)}
+              onImportVerification={(jobId) =>
+                void importJobVerificationReceipt(jobId)
+              }
               busy={busy}
             />
           ) : view === "overview" ? (

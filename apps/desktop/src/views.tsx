@@ -555,6 +555,7 @@ export function JobDetailView({
   onPublish,
   onMatchProvider,
   onIngestEvidence,
+  onImportVerification,
 }: {
   job: DesktopJob;
   busy: boolean;
@@ -563,12 +564,26 @@ export function JobDetailView({
   onPublish: (jobId: string) => void;
   onMatchProvider: (jobId: string) => void;
   onIngestEvidence: (jobId: string) => void;
+  onImportVerification: (jobId: string) => void;
 }) {
   const current = lifecycle.indexOf(job.state);
   const canMatchProvider = ["queued", "matching"].includes(job.state);
   const canIngestEvidence = ["queued", "matching", "running", "verifying"].includes(
     job.state,
   );
+  const canImportVerification =
+    job.state === "verifying" || Boolean(job.evidence.bundle_sha256);
+  const executionStatus = job.evidence.execution_receipt_sha256
+    ? "Provider receipt imported"
+    : job.provider_node_id
+      ? "Provider assigned; waiting for evidence"
+      : "Waiting for provider assignment";
+  const quorumStatus =
+    job.evidence.verifier_count >= job.required_verifier_count
+      ? "Verifier quorum accepted"
+      : `${job.required_verifier_count - job.evidence.verifier_count} verifier receipt${
+          job.required_verifier_count - job.evidence.verifier_count === 1 ? "" : "s"
+        } remaining`;
   return (
     <section className="workspace-section">
       <div className="detail-toolbar">
@@ -615,6 +630,16 @@ export function JobDetailView({
               type="button"
             >
               Import evidence
+            </button>
+          ) : null}
+          {canImportVerification ? (
+            <button
+              className="secondary-button"
+              disabled={busy}
+              onClick={() => onImportVerification(job.job_id)}
+              type="button"
+            >
+              Import verifier receipt
             </button>
           ) : null}
         </div>
@@ -718,8 +743,8 @@ export function JobDetailView({
               <span className="eyebrow">PROOF</span>
               <h3>Evidence receipt</h3>
             </div>
-            <span className="pending-badge">
-              {job.evidence.verification_status ?? "Pending"}
+          <span className="pending-badge">
+              {job.evidence.verification_status ?? executionStatus}
             </span>
           </div>
           <dl className="definition-list mono-values">
@@ -738,13 +763,17 @@ export function JobDetailView({
               </dd>
             </div>
             <div>
+              <dt>Quorum status</dt>
+              <dd>{quorumStatus}</dd>
+            </div>
+            <div>
               <dt>Horizen anchor</dt>
               <dd>{short(job.evidence.chain_tx_hash)}</dd>
             </div>
           </dl>
           <p className="panel-footnote">
-            Hashes appear only after provider execution and independent
-            verification.
+            Provider evidence is imported from signed execution bundles.
+            Completion requires accepted verifier receipts to reach quorum.
           </p>
         </article>
       </section>

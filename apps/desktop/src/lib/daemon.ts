@@ -66,6 +66,11 @@ export interface EvidenceIngestionInput {
   evidence_dir: string;
 }
 
+export interface VerificationReceiptImportInput {
+  job_id: string;
+  receipt_json_path: string;
+}
+
 export interface JobEvidenceSummary {
   execution_receipt_sha256: string | null;
   verification_status: string | null;
@@ -175,6 +180,12 @@ export function ingestEvidence(
   input: EvidenceIngestionInput,
 ): Promise<WorkspaceSnapshot> {
   return invoke<WorkspaceSnapshot>("ingest_evidence", { input });
+}
+
+export function importVerificationReceipt(
+  input: VerificationReceiptImportInput,
+): Promise<WorkspaceSnapshot> {
+  return invoke<WorkspaceSnapshot>("import_verification_receipt", { input });
 }
 
 export function configureWallet(

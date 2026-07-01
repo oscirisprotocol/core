@@ -1,5 +1,61 @@
 # Task Plan
 
+## Desktop Execution and Verification Completion
+
+### Objective
+
+Make provider execution state and verifier completion observable/actionable from
+desktop after matching: users can see assigned/executing/evidence states and
+import signed verifier receipts so jobs reach completed only after quorum.
+
+### Spec
+
+- Keep provider execution non-custodial: desktop observes/imports evidence for
+  external providers instead of executing with provider keys it does not own.
+- Clarify job detail execution state for assigned provider, pending evidence,
+  imported provider receipt, and verifier quorum.
+- Add daemon command accepting a signed `VerificationReceiptAnnouncement` JSON
+  file.
+- Validate verifier identity and verification receipt signature before storing.
+- Refresh desktop protocol state so verifier count/quorum can mark completed.
+- Add desktop file picker action for importing verifier receipts.
+
+### Checklist
+
+- [x] Add daemon verification receipt import command
+- [x] Add regression coverage for accepted verifier quorum completion
+- [x] Add Tauri/TypeScript bindings and job-detail import action
+- [x] Improve job-detail execution/quorum status copy
+- [x] Verify daemon, frontend, and native Tauri checks
+- [x] Update review notes and push
+
+### Review
+
+- Kept provider execution non-custodial: desktop now makes assignment,
+  execution/evidence, and verifier-quorum state explicit without pretending to
+  execute jobs for external providers.
+- Added daemon `ImportVerificationReceipt` command accepting a signed
+  `VerificationReceiptAnnouncement` JSON file.
+- Daemon validates requested job ID, verifier ID consistency, verifier public
+  key, and verification receipt signature before storing.
+- Import refreshes desktop protocol state, allowing verifier count/quorum to
+  mark jobs completed.
+- Added Tauri/TypeScript bindings and a job-detail `Import verifier receipt`
+  file-picker action.
+- Job detail now distinguishes assigned provider/waiting evidence, provider
+  receipt imported, and verifier quorum status.
+- Added regression coverage proving one accepted verifier receipt completes a
+  one-verifier job.
+- Verification passed:
+  - `cargo test -p osciris-daemon import_verification_receipt_completes_job_after_quorum --locked -- --nocapture`
+  - `cargo fmt --check`
+  - `cargo test --locked -p osciris-daemon`
+  - `cargo clippy -p osciris-daemon --locked --all-targets -- -D warnings`
+  - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop prepare:sidecar:debug`
+  - `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  - `pnpm --dir apps/desktop tauri build`
+
 ## Desktop Provider Matching
 
 ### Objective
