@@ -34,15 +34,22 @@ status without shelling out to the CLI.
   evidence files, records job spec/execution receipt/receipt bundle, and then
   refreshes desktop protocol state.
 - Added daemon client, Tauri, and TypeScript wrappers for evidence ingestion.
-- Added regression coverage that runs a real signed provider job, records
-  signed availability, ingests evidence through the daemon, and verifies the
-  desktop job moves to `verifying` with receipt hashes populated.
+- Added regression coverage that writes deterministic signed provider evidence,
+  records signed availability, ingests evidence through the daemon, and
+  verifies the desktop job moves to `verifying` with receipt hashes populated.
 - Verification passed:
   - `cargo test -p osciris-daemon ingest_evidence_records_receipt_and_refreshes_job --locked -- --nocapture`
   - `cargo test -p osciris-daemon --locked`
   - `cargo clippy -p osciris-daemon --locked --all-targets -- -D warnings`
   - `pnpm --dir apps/desktop build`
   - `pnpm --dir apps/desktop tauri build`
+- CI follow-up fixed the regression test to avoid depending on `uv` being
+  installed on GitHub desktop verify runners; the same workflow commands pass
+  locally:
+  - `cargo test --locked -p osciris-daemon`
+  - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop prepare:sidecar:debug`
+  - `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
 
 ## Desktop Protocol Status Sync
 

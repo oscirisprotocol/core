@@ -1707,9 +1707,10 @@ fn update_wallet_commitment(state: &mut PersistedState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::engine::general_purpose::STANDARD as BASE64;
-    use osciris_core::sign_receipt_availability;
-    use osciris_node::{run_job, ProviderConfig};
+    use osciris_core::{
+        canonical_json_sha256, sign_execution_receipt, sign_receipt_availability, ArtifactManifest,
+        ChainSubmissionStatus, ExecutionStatus, GpuMetadata, SHA256_ALGORITHM,
+    };
 
     fn valid_job_input() -> CreateJobInput {
         CreateJobInput {
@@ -1844,7 +1845,6 @@ mod tests {
     #[tokio::test]
     async fn ingest_evidence_records_receipt_and_refreshes_job() {
         let directory = tempfile::tempdir().unwrap();
-        let provider_work_root = tempfile::tempdir().unwrap();
         let service = DaemonService::new(directory.path().to_path_buf()).unwrap();
         let job = service.create_job(valid_job_input()).await.unwrap();
         service.submit_job(&job.job_id).await.unwrap();
@@ -1860,26 +1860,92 @@ mod tests {
             .unwrap();
         let provider_key = ed25519_dalek::SigningKey::from_bytes(&[9_u8; 32]);
         let provider_public = verifying_key_to_base64(&provider_key.verifying_key());
-        let provider = ProviderConfig {
-            provider_id: "provider-a".to_string(),
-            signing_key_id: "provider-a-key".to_string(),
-            signing_key_seed_base64: BASE64.encode([9_u8; 32]),
-            repo_root: std::env::current_dir().unwrap(),
-            work_root: provider_work_root.path().to_path_buf(),
+        let evidence_dir = directory.path().join("provider-evidence");
+        fs::create_dir_all(&evidence_dir).unwrap();
+        let job_spec_path = evidence_dir.join("job_spec.json");
+        let metrics_path = evidence_dir.join("metrics.json");
+        let stdout_path = evidence_dir.join("stdout.log");
+        let stderr_path = evidence_dir.join("stderr.log");
+        let execution_receipt_path = evidence_dir.join("execution_receipt.json");
+        let receipt_bundle_path = evidence_dir.join("receipt_bundle.json");
+        let bundle_index_path = evidence_dir.join("bundle_index.json");
+        fs::write(
+            &job_spec_path,
+            serde_json::to_vec_pretty(&announcement.job_spec).unwrap(),
+        )
+        .unwrap();
+        fs::write(&metrics_path, br#"{"latency_ms": 42}"#).unwrap();
+        fs::write(&stdout_path, b"ok\n").unwrap();
+        fs::write(&stderr_path, b"").unwrap();
+
+        let artifact_manifest = ArtifactManifest {
+            name: "metrics.json".to_string(),
+            algorithm: SHA256_ALGORITHM.to_string(),
+            chunk_size: 8192,
+            chunks: vec![sha256_file(&metrics_path).unwrap()],
+            merkle_root: sha256_file(&metrics_path).unwrap(),
+            byte_length: fs::metadata(&metrics_path).unwrap().len(),
+            path: "metrics.json".to_string(),
         };
-        let output = run_job(&announcement.job_spec, &provider).await.unwrap();
+        let mut receipt = ExecutionReceipt {
+            receipt_id: uuid::Uuid::now_v7(),
+            job_id: announcement.job_id,
+            provider_id: "provider-a".to_string(),
+            job_type: announcement.job_spec.job_type.clone(),
+            status: ExecutionStatus::Completed,
+            command_exit_code: 0,
+            started_at: Utc::now().to_rfc3339(),
+            finished_at: Utc::now().to_rfc3339(),
+            wall_clock_seconds: 0.1,
+            stdout_sha256: sha256_file(&stdout_path).unwrap(),
+            stderr_sha256: sha256_file(&stderr_path).unwrap(),
+            artifact_root_sha256: canonical_json_sha256(&vec![artifact_manifest.clone()]).unwrap(),
+            artifact_manifests: vec![artifact_manifest],
+            metrics_path: "metrics.json".to_string(),
+            gpu_metadata: GpuMetadata {
+                gpu_model: "test-gpu".to_string(),
+                driver: "test-driver".to_string(),
+                cuda_available: false,
+                vram_gb: Some(24.0),
+            },
+            signature: String::new(),
+            signing_key_id: "provider-a-key".to_string(),
+        };
+        receipt.signature = sign_execution_receipt(&receipt, &provider_key).unwrap();
+        fs::write(
+            &execution_receipt_path,
+            serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &bundle_index_path,
+            br#"{"job_id":"00000000-0000-0000-0000-000000000000","artifacts":[],"execution_receipt_path":"execution_receipt.json","verification_receipt_paths":[]}"#,
+        )
+        .unwrap();
+        let mut bundle = ReceiptBundle {
+            bundle_id: uuid::Uuid::now_v7(),
+            job_id: announcement.job_id,
+            job_spec_sha256: sha256_file(&job_spec_path).unwrap(),
+            execution_receipt_sha256: sha256_file(&execution_receipt_path).unwrap(),
+            verification_receipt_sha256_list: vec![],
+            bundle_sha256: String::new(),
+            artifact_index_path: "bundle_index.json".to_string(),
+            chain_submission_status: ChainSubmissionStatus::Pending,
+        };
+        bundle.bundle_sha256 = bundle_hash(&bundle).unwrap();
+        fs::write(
+            &receipt_bundle_path,
+            serde_json::to_vec_pretty(&bundle).unwrap(),
+        )
+        .unwrap();
+
         let mut availability = ReceiptAvailability {
             job_id: announcement.job_id,
-            provider_node_id: provider.provider_id.clone(),
+            provider_node_id: "provider-a".to_string(),
             provider_ed25519_public_key_base64: provider_public,
-            execution_receipt_sha256: sha256_file(&output.execution_receipt_path).unwrap(),
-            bundle_sha256: {
-                let bundle: ReceiptBundle =
-                    serde_json::from_slice(&fs::read(&output.receipt_bundle_path).unwrap())
-                        .unwrap();
-                bundle.bundle_sha256
-            },
-            bundle_uri: format!("file://{}", output.evidence_dir.display()),
+            execution_receipt_sha256: bundle.execution_receipt_sha256.clone(),
+            bundle_sha256: bundle.bundle_sha256.clone(),
+            bundle_uri: format!("file://{}", evidence_dir.display()),
             announced_at: Utc::now().to_rfc3339(),
             signature: String::new(),
         };
@@ -1892,7 +1958,7 @@ mod tests {
         let refreshed = service
             .ingest_evidence(EvidenceIngestionInput {
                 job_id: job.job_id.clone(),
-                evidence_dir: output.evidence_dir.display().to_string(),
+                evidence_dir: evidence_dir.display().to_string(),
             })
             .await
             .unwrap();
