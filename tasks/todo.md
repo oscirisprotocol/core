@@ -1,5 +1,41 @@
 # Task Plan
 
+## Desktop OSCIRIS Branding
+
+### Objective
+
+Replace the default or mismatched desktop branding with the existing OSCIRIS
+mark already present in the workspace, both for packaged app icons and in-app
+navigation branding.
+
+### Spec
+
+- Use the canonical `apps/desktop/src-tauri/icons/osciris.svg` mark.
+- Configure Tauri packaging to use the existing generated icon set instead of
+  relying on implicit defaults.
+- Replace the simplified in-app hex/leaf glyph with the same OSCIRIS
+  three-sweep mark.
+- Verify frontend and native desktop builds after the branding change.
+
+### Checklist
+
+- [x] Add explicit Tauri bundle icon configuration
+- [x] Replace the in-app custom mark with the canonical OSCIRIS mark
+- [x] Build/test the desktop app
+- [ ] Commit and push the branding update
+
+### Review
+
+- Tauri packaging now explicitly uses the existing desktop icon set, including
+  `icon.icns`, `icon.ico`, `icon.png`, and standard PNG sizes.
+- The in-app sidebar brand mark now uses the same three-sweep OSCIRIS vector
+  shape as `apps/desktop/src-tauri/icons/osciris.svg`.
+- Verified the generated macOS bundle declares `CFBundleIconFile => icon.icns`
+  and includes `Contents/Resources/icon.icns`.
+- Desktop verification passed:
+  - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop tauri build`
+
 ## Protocol Settlement and Execution Backlog
 
 ### Objective
