@@ -21,7 +21,8 @@ use osciris_core::{
     bundle_hash, load_signing_key_from_base64_seed, sha256_file, sign_challenge_record,
     sign_job_announcement, sign_job_assignment, sign_job_claim, sign_milestone_record,
     sign_provider_capability, sign_receipt_availability, verify_challenge_record_signature,
-    verify_job_claim_signature, verify_milestone_record_signature,
+    verify_job_announcement_signature, verify_job_claim_signature,
+    verify_milestone_record_signature, verify_provider_capability_signature,
     verify_receipt_availability_signature, verify_verification_receipt_signature,
     verifying_key_from_base64, verifying_key_to_base64, ChainSubmissionStatus, ChallengeReasonCode,
     ChallengeRecord, ChallengeStatus, ExecutionReceipt, JobAnnouncement, JobAssignment, JobClaim,
@@ -30,8 +31,9 @@ use osciris_core::{
     VerificationReceipt, VerificationReceiptAnnouncement,
 };
 use osciris_node::network::{
-    auto_fetch_receipts, fetch_receipt_bundle_p2p, peer_id_from_signing_seed, run_auto_provider,
-    serve_presence, AutoProviderConfig, AutoVerifierConfig, BundleFetchConfig, NetworkServeConfig,
+    auto_fetch_receipts, fetch_receipt_bundle_p2p, job_matches_provider_capability,
+    peer_id_from_signing_seed, run_auto_provider, serve_presence, AutoProviderConfig,
+    AutoVerifierConfig, BundleFetchConfig, NetworkServeConfig,
 };
 use osciris_node::status::{
     build_provider_network_status, calculate_quorum_status, calculate_settlement_status,
@@ -454,6 +456,20 @@ enum NetworkCommands {
         #[arg(long)]
         signing_key_seed_file: Option<PathBuf>,
         #[arg(long, default_value = "manual_assignment")]
+        assignment_reason: String,
+    },
+    AutoAssignJob {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        job_id: Uuid,
+        #[arg(long)]
+        assigner_id: String,
+        #[arg(long)]
+        signing_key_seed_base64: Option<String>,
+        #[arg(long)]
+        signing_key_seed_file: Option<PathBuf>,
+        #[arg(long, default_value = "auto_match")]
         assignment_reason: String,
     },
     Assignments {
@@ -1517,6 +1533,28 @@ fn main() -> Result<()> {
                 };
                 assignment.signature = sign_job_assignment(&assignment, &signing_key)?;
                 runtime.block_on(store.record_job_assignment(&assignment))?;
+                print_json(&assignment)?;
+            }
+            NetworkCommands::AutoAssignJob {
+                work_root,
+                job_id,
+                assigner_id,
+                signing_key_seed_base64,
+                signing_key_seed_file,
+                assignment_reason,
+            } => {
+                let store = runtime.block_on(ProtocolStore::open(&work_root.join(".osciris")))?;
+                let signing_key = load_signing_key_from_seed_source(
+                    signing_key_seed_base64,
+                    signing_key_seed_file,
+                )?;
+                let assignment = runtime.block_on(auto_assign_job(
+                    &store,
+                    job_id,
+                    &assigner_id,
+                    &signing_key,
+                    &assignment_reason,
+                ))?;
                 print_json(&assignment)?;
             }
             NetworkCommands::Assignments { work_root } => {
@@ -3316,6 +3354,129 @@ fn create_signed_provider_capability(
     Ok(capability)
 }
 
+#[derive(Debug, Clone)]
+struct ProviderMatchCandidate {
+    provider_node_id: String,
+    current_load: f64,
+    active_job_count: u32,
+    claimed_at: String,
+}
+
+async fn auto_assign_job(
+    store: &ProtocolStore,
+    job_id: Uuid,
+    assigner_id: &str,
+    signing_key: &ed25519_dalek::SigningKey,
+    assignment_reason: &str,
+) -> Result<JobAssignment> {
+    let announcement = store
+        .load_job_announcement(&job_id.to_string())
+        .await?
+        .with_context(|| format!("cannot auto-assign unknown job {job_id}"))?;
+    validate_job_announcement(&announcement)?;
+    if let Some(existing) = store.load_job_assignment(&job_id.to_string()).await? {
+        return Ok(existing);
+    }
+
+    let claims = store.load_job_claims_by_job(&job_id.to_string()).await?;
+    let selected = select_provider_match(&announcement, &claims, store).await?;
+    let mut assignment = JobAssignment {
+        job_id,
+        assigned_provider_node_id: selected.provider_node_id,
+        assigner_node_id: assigner_id.to_string(),
+        assigner_ed25519_public_key_base64: verifying_key_to_base64(&signing_key.verifying_key()),
+        assignment_reason: assignment_reason.to_string(),
+        assigned_at: Utc::now().to_rfc3339(),
+        signature: String::new(),
+    };
+    assignment.signature = sign_job_assignment(&assignment, signing_key)?;
+    store.record_job_assignment(&assignment).await?;
+    Ok(assignment)
+}
+
+async fn select_provider_match(
+    announcement: &JobAnnouncement,
+    claims: &[JobClaim],
+    store: &ProtocolStore,
+) -> Result<ProviderMatchCandidate> {
+    let mut candidates = Vec::new();
+    for claim in claims {
+        if claim.job_id != announcement.job_id {
+            continue;
+        }
+        let Some(capability) = store
+            .load_provider_capability(&claim.provider_node_id)
+            .await?
+        else {
+            continue;
+        };
+        if let Some(candidate) =
+            validate_provider_match_candidate(announcement, claim, &capability)?
+        {
+            candidates.push(candidate);
+        }
+    }
+    candidates.sort_by(compare_provider_match_candidates);
+    candidates.into_iter().next().with_context(|| {
+        format!(
+            "no valid provider claims matched job {} and capability {}",
+            announcement.job_id, announcement.required_capability
+        )
+    })
+}
+
+fn validate_provider_match_candidate(
+    announcement: &JobAnnouncement,
+    claim: &JobClaim,
+    capability: &ProviderCapability,
+) -> Result<Option<ProviderMatchCandidate>> {
+    if capability.node_id != claim.provider_node_id {
+        return Ok(None);
+    }
+    if capability.ed25519_public_key_base64 != claim.provider_ed25519_public_key_base64 {
+        return Ok(None);
+    }
+    let provider_key = verifying_key_from_base64(&claim.provider_ed25519_public_key_base64)
+        .context("failed to decode provider claim public key")?;
+    verify_job_claim_signature(claim, &provider_key).context("provider claim signature invalid")?;
+    verify_provider_capability_signature(capability, &provider_key)
+        .context("provider capability signature invalid")?;
+    if !matches!(
+        capability.status,
+        NodeStatus::OnlineIdle | NodeStatus::OnlineBusy
+    ) {
+        return Ok(None);
+    }
+    if !job_matches_provider_capability(announcement, capability) {
+        return Ok(None);
+    }
+    Ok(Some(ProviderMatchCandidate {
+        provider_node_id: claim.provider_node_id.clone(),
+        current_load: capability.current_load,
+        active_job_count: capability.active_job_count,
+        claimed_at: claim.claimed_at.clone(),
+    }))
+}
+
+fn compare_provider_match_candidates(
+    left: &ProviderMatchCandidate,
+    right: &ProviderMatchCandidate,
+) -> std::cmp::Ordering {
+    left.current_load
+        .total_cmp(&right.current_load)
+        .then_with(|| left.active_job_count.cmp(&right.active_job_count))
+        .then_with(|| left.claimed_at.cmp(&right.claimed_at))
+        .then_with(|| left.provider_node_id.cmp(&right.provider_node_id))
+}
+
+fn validate_job_announcement(announcement: &JobAnnouncement) -> Result<()> {
+    let submitter_key =
+        verifying_key_from_base64(&announcement.submitter_ed25519_public_key_base64)
+            .context("failed to decode job submitter public key")?;
+    verify_job_announcement_signature(announcement, &submitter_key)
+        .context("job announcement signature invalid")
+}
+
 fn signed_job_claim(
     provider_id: &str,
     public_key: &str,
@@ -3625,8 +3786,9 @@ fn parse_node_role(raw: &str) -> Result<NodeRole> {
 mod tests {
     use super::*;
     use osciris_core::{
-        sign_verification_receipt, verify_provider_capability_signature, ExecutionStatus,
-        GpuMetadata, VerificationChecks, VerificationReceipt, VerificationStatus,
+        sign_verification_receipt, verify_job_assignment_signature,
+        verify_provider_capability_signature, ExecutionStatus, GpuMetadata, VerificationChecks,
+        VerificationReceipt, VerificationStatus,
     };
 
     fn temp_work_root(name: &str) -> PathBuf {
@@ -3660,6 +3822,57 @@ mod tests {
             signature: "signature".to_string(),
             signing_key_id: "provider-key".to_string(),
         }
+    }
+
+    fn test_signing_key(byte: u8) -> ed25519_dalek::SigningKey {
+        let seed = BASE64.encode([byte; 32]);
+        load_signing_key_from_base64_seed(&seed).unwrap()
+    }
+
+    fn signed_test_announcement(
+        job_id: Uuid,
+        signing_key: &ed25519_dalek::SigningKey,
+    ) -> JobAnnouncement {
+        let job = mock_demo_job(job_id);
+        let mut announcement = JobAnnouncement {
+            job_id,
+            job_spec: job.clone(),
+            submitter_node_id: "enterprise-1".to_string(),
+            submitter_ed25519_public_key_base64: verifying_key_to_base64(
+                &signing_key.verifying_key(),
+            ),
+            job_type: job.job_type.clone(),
+            privacy_mode: job.privacy_policy.privacy_mode.clone(),
+            required_capability: "gpu>=24gb".to_string(),
+            estimated_runtime_class: "short".to_string(),
+            payment_token: job.payment_token.clone(),
+            escrow_amount_atomic: job.escrow_amount_atomic.clone(),
+            required_verifier_count: job.required_verifier_count,
+            announced_at: "2026-06-04T00:00:00Z".to_string(),
+            signature: String::new(),
+        };
+        announcement.signature = sign_job_announcement(&announcement, signing_key).unwrap();
+        announcement
+    }
+
+    fn signed_test_capability(
+        provider_id: &str,
+        signing_key: &ed25519_dalek::SigningKey,
+        current_load: f64,
+        active_job_count: u32,
+    ) -> ProviderCapability {
+        let mut capability = signed_provider_capability(
+            provider_id,
+            &verifying_key_to_base64(&signing_key.verifying_key()),
+            signing_key,
+            "aws_g5_xlarge",
+        )
+        .unwrap();
+        capability.current_load = current_load;
+        capability.active_job_count = active_job_count;
+        capability.signature.clear();
+        capability.signature = sign_provider_capability(&capability, signing_key).unwrap();
+        capability
     }
 
     fn verification_receipt(verifier_id: &str) -> VerificationReceipt {
@@ -3873,6 +4086,104 @@ mod tests {
             verifying_key_to_base64(&signing_key.verifying_key())
         );
         verify_provider_capability_signature(&capability, &signing_key.verifying_key()).unwrap();
+    }
+
+    #[test]
+    fn auto_assign_job_selects_lowest_load_valid_claimant() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let work_root = temp_work_root("osciris-auto-assign");
+        let store = runtime
+            .block_on(ProtocolStore::open(&work_root.join(".osciris")))
+            .unwrap();
+
+        let enterprise_key = test_signing_key(1);
+        let provider_a_key = test_signing_key(2);
+        let provider_b_key = test_signing_key(3);
+        let assigner_key = test_signing_key(4);
+        let job_id = Uuid::now_v7();
+        let announcement = signed_test_announcement(job_id, &enterprise_key);
+        runtime
+            .block_on(store.record_job_announcement(&announcement))
+            .unwrap();
+
+        let capability_a = signed_test_capability("provider-a", &provider_a_key, 0.60, 0);
+        let capability_b = signed_test_capability("provider-b", &provider_b_key, 0.10, 2);
+        runtime
+            .block_on(store.record_provider_capability(&capability_a))
+            .unwrap();
+        runtime
+            .block_on(store.record_provider_capability(&capability_b))
+            .unwrap();
+
+        let provider_a_public = verifying_key_to_base64(&provider_a_key.verifying_key());
+        let provider_b_public = verifying_key_to_base64(&provider_b_key.verifying_key());
+        let claim_a =
+            signed_job_claim("provider-a", &provider_a_public, &provider_a_key, job_id).unwrap();
+        let claim_b =
+            signed_job_claim("provider-b", &provider_b_public, &provider_b_key, job_id).unwrap();
+        runtime.block_on(store.record_job_claim(&claim_a)).unwrap();
+        runtime.block_on(store.record_job_claim(&claim_b)).unwrap();
+
+        let assignment = runtime
+            .block_on(auto_assign_job(
+                &store,
+                job_id,
+                "enterprise-1",
+                &assigner_key,
+                "auto_match",
+            ))
+            .unwrap();
+        assert_eq!(assignment.assigned_provider_node_id, "provider-b");
+        verify_job_assignment_signature(&assignment, &assigner_key.verifying_key()).unwrap();
+
+        let stored = runtime
+            .block_on(store.load_job_assignment(&job_id.to_string()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.assigned_provider_node_id, "provider-b");
+        std::fs::remove_dir_all(work_root).unwrap();
+    }
+
+    #[test]
+    fn auto_assign_job_rejects_tampered_claim_signature() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let work_root = temp_work_root("osciris-auto-assign-tampered");
+        let store = runtime
+            .block_on(ProtocolStore::open(&work_root.join(".osciris")))
+            .unwrap();
+
+        let enterprise_key = test_signing_key(5);
+        let provider_key = test_signing_key(6);
+        let assigner_key = test_signing_key(7);
+        let job_id = Uuid::now_v7();
+        let announcement = signed_test_announcement(job_id, &enterprise_key);
+        runtime
+            .block_on(store.record_job_announcement(&announcement))
+            .unwrap();
+        let capability = signed_test_capability("provider-a", &provider_key, 0.0, 0);
+        runtime
+            .block_on(store.record_provider_capability(&capability))
+            .unwrap();
+
+        let provider_public = verifying_key_to_base64(&provider_key.verifying_key());
+        let mut claim =
+            signed_job_claim("provider-a", &provider_public, &provider_key, job_id).unwrap();
+        claim.claim_note = Some("tampered-after-signing".to_string());
+        runtime.block_on(store.record_job_claim(&claim)).unwrap();
+
+        let error = runtime
+            .block_on(auto_assign_job(
+                &store,
+                job_id,
+                "enterprise-1",
+                &assigner_key,
+                "auto_match",
+            ))
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("provider claim signature invalid"));
+        std::fs::remove_dir_all(work_root).unwrap();
     }
 
     #[test]

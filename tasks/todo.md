@@ -1,5 +1,61 @@
 # Task Plan
 
+## Provider Matching and Execution Protocol Slice
+
+### Objective
+
+Add the missing backend assignment step between provider claims and provider
+execution. The protocol already supports signed job announcements, provider
+capabilities, provider claims, signed assignments, and auto-provider execution
+of assigned jobs. The gap is deterministic assignment from stored signed
+claims/capabilities without manual provider selection.
+
+### Spec
+
+- Add a CLI/backend command that loads one announced job and all stored claims
+  for that job.
+- Verify the job announcement signature against the submitter public key.
+- For each claim, require a stored provider capability, matching provider public
+  key, valid provider capability signature, valid claim signature, online/idle
+  or online/busy provider status, and capability fit.
+- Select the best provider deterministically by lowest current load, lowest
+  active job count, earliest claim timestamp, then provider node ID.
+- Sign and persist a `JobAssignment` with the assigner key.
+- Preserve the existing auto-provider execution boundary: providers still
+  execute only assignments signed by a configured trusted assigner.
+- Do not add desktop UI until this backend surface is proven.
+
+### Checklist
+
+- [x] Add deterministic provider selection helpers
+- [x] Add `network auto-assign-job` CLI command
+- [x] Add unit coverage for selection and signature validation
+- [x] Verify targeted node/CLI tests
+- [ ] Update review notes and push
+
+### Review
+
+- Added `osciris-node network auto-assign-job` to select a provider from stored
+  signed claims and persist a signed assignment.
+- The selector verifies the job announcement signature, provider claim
+  signature, provider capability signature, public-key consistency, provider
+  online status, and capability fit before assignment.
+- Deterministic ranking is lowest current load, lowest active job count,
+  earliest claim timestamp, then provider node ID.
+- Existing assignments are returned idempotently instead of being replaced.
+- The existing auto-provider execution path remains unchanged: providers still
+  execute only assignments signed by a configured trusted assigner.
+- Added tests for lowest-load valid claimant selection and tampered-claim
+  rejection.
+- Verification passed:
+  - `cargo test -p osciris-cli auto_assign --locked`
+  - `cargo test -p osciris-node job_matching --locked`
+  - `cargo fmt --check`
+  - `cargo clippy -p osciris-cli --locked --all-targets -- -D warnings`
+  - `cargo test -p osciris-cli --locked`
+  - `cargo test -p osciris-node --locked`
+  - `cargo test --workspace --locked` (74 passed, 1 ignored live-RPC test)
+
 ## Desktop OSCIRIS Branding
 
 ### Objective
