@@ -1939,15 +1939,20 @@ fn main() -> Result<()> {
                     .join("evidence")
                     .join(job_id.to_string());
                 copy_dir_recursive_replace(&source_dir, &evidence_dir)?;
-                let bundle = validate_fetched_evidence(&evidence_dir, &availability)?;
-                runtime.block_on(store.record_receipt_bundle(&bundle))?;
+                let ingestion = runtime.block_on(ingest_fetched_evidence(
+                    &store,
+                    &evidence_dir,
+                    &availability,
+                ))?;
                 print_json(&serde_json::json!({
                     "job_id": job_id,
                     "provider_id": provider_id,
                     "source_dir": source_dir,
                     "evidence_dir": evidence_dir,
                     "execution_receipt_sha256": availability.execution_receipt_sha256,
-                    "bundle_sha256": availability.bundle_sha256
+                    "bundle_sha256": availability.bundle_sha256,
+                    "execution_receipt_path": ingestion.execution_receipt_path,
+                    "receipt_bundle_path": ingestion.receipt_bundle_path
                 }))?;
             }
             NetworkCommands::FetchReceiptBundleP2p {
@@ -2024,9 +2029,12 @@ fn main() -> Result<()> {
                 if !evidence_dir.exists() {
                     let source_dir = local_path_from_bundle_uri(&availability.bundle_uri)?;
                     copy_dir_recursive_replace(&source_dir, &evidence_dir)?;
-                    let bundle = validate_fetched_evidence(&evidence_dir, &availability)?;
-                    runtime.block_on(store.record_receipt_bundle(&bundle))?;
                 }
+                let ingestion = runtime.block_on(ingest_fetched_evidence(
+                    &store,
+                    &evidence_dir,
+                    &availability,
+                ))?;
                 let verifier = VerifierConfig {
                     verifier_id,
                     signing_key_id,
@@ -2041,6 +2049,8 @@ fn main() -> Result<()> {
                     "job_id": job_id,
                     "provider_id": provider_id,
                     "evidence_dir": evidence_dir,
+                    "ingested_execution_receipt_path": ingestion.execution_receipt_path,
+                    "ingested_receipt_bundle_path": ingestion.receipt_bundle_path,
                     "verification_receipt_path": output.verification_receipt_path,
                     "receipt_bundle_path": output.receipt_bundle_path
                 }))?;
@@ -3631,16 +3641,82 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct IngestedEvidence {
+    execution_receipt_path: PathBuf,
+    receipt_bundle_path: PathBuf,
+    execution_receipt_sha256: String,
+    bundle_sha256: String,
+}
+
+async fn ingest_fetched_evidence(
+    store: &ProtocolStore,
+    evidence_dir: &Path,
+    availability: &ReceiptAvailability,
+) -> Result<IngestedEvidence> {
+    let validated = validate_fetched_evidence(evidence_dir, availability)?;
+    store
+        .upsert_job_spec(
+            &validated.job_spec,
+            &json_enum_label(&validated.execution_receipt.status)?,
+            Some(evidence_dir),
+            Some(&validated.execution_receipt.metrics_path),
+        )
+        .await?;
+    store
+        .record_execution_receipt(
+            &validated.execution_receipt,
+            evidence_dir,
+            &validated.execution_receipt.metrics_path,
+        )
+        .await?;
+    store.record_receipt_bundle(&validated.bundle).await?;
+    Ok(IngestedEvidence {
+        execution_receipt_path: validated.execution_receipt_path,
+        receipt_bundle_path: validated.receipt_bundle_path,
+        execution_receipt_sha256: availability.execution_receipt_sha256.clone(),
+        bundle_sha256: availability.bundle_sha256.clone(),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct ValidatedFetchedEvidence {
+    job_spec: JobSpec,
+    execution_receipt: ExecutionReceipt,
+    bundle: ReceiptBundle,
+    execution_receipt_path: PathBuf,
+    receipt_bundle_path: PathBuf,
+}
+
 fn validate_fetched_evidence(
     evidence_dir: &Path,
     availability: &ReceiptAvailability,
-) -> Result<ReceiptBundle> {
+) -> Result<ValidatedFetchedEvidence> {
+    let job_spec_path = evidence_dir.join("job_spec.json");
     let execution_receipt_path = evidence_dir.join("execution_receipt.json");
     let receipt_bundle_path = evidence_dir.join("receipt_bundle.json");
+    let job_spec: JobSpec = serde_json::from_slice(
+        &fs::read(&job_spec_path)
+            .with_context(|| format!("failed to read {}", job_spec_path.display()))?,
+    )?;
     let execution_receipt: ExecutionReceipt = serde_json::from_slice(
         &fs::read(&execution_receipt_path)
             .with_context(|| format!("failed to read {}", execution_receipt_path.display()))?,
     )?;
+    if job_spec.job_id != availability.job_id {
+        bail!(
+            "job spec job_id {} does not match availability job_id {}",
+            job_spec.job_id,
+            availability.job_id
+        );
+    }
+    if job_spec.job_id != execution_receipt.job_id {
+        bail!(
+            "job spec job_id {} does not match execution receipt job_id {}",
+            job_spec.job_id,
+            execution_receipt.job_id
+        );
+    }
     if execution_receipt.job_id != availability.job_id {
         bail!(
             "fetched execution receipt job_id {} does not match availability job_id {}",
@@ -3663,6 +3739,9 @@ fn validate_fetched_evidence(
             availability.execution_receipt_sha256
         );
     }
+    let provider_key = verifying_key_from_base64(&availability.provider_ed25519_public_key_base64)?;
+    osciris_core::verify_execution_receipt_signature(&execution_receipt, &provider_key)
+        .context("fetched execution receipt signature invalid")?;
     let bundle: ReceiptBundle = serde_json::from_slice(
         &fs::read(&receipt_bundle_path)
             .with_context(|| format!("failed to read {}", receipt_bundle_path.display()))?,
@@ -3696,7 +3775,13 @@ fn validate_fetched_evidence(
             availability.bundle_sha256
         );
     }
-    Ok(bundle)
+    Ok(ValidatedFetchedEvidence {
+        job_spec,
+        execution_receipt,
+        bundle,
+        execution_receipt_path,
+        receipt_bundle_path,
+    })
 }
 
 fn load_verification_receipts(evidence_dir: &Path) -> Result<Vec<VerificationReceipt>> {
@@ -3713,6 +3798,13 @@ fn load_verification_receipts(evidence_dir: &Path) -> Result<Vec<VerificationRec
     }
     receipts.sort_by(|left, right| left.verifier_id.cmp(&right.verifier_id));
     Ok(receipts)
+}
+
+fn json_enum_label<T: Serialize>(value: &T) -> Result<String> {
+    Ok(serde_json::to_value(value)?
+        .as_str()
+        .unwrap_or_default()
+        .to_string())
 }
 
 async fn record_verified_verification_receipt_announcement(
@@ -4016,6 +4108,72 @@ mod tests {
             .unwrap();
         assert!(receipts.is_empty());
         std::fs::remove_dir_all(work_root).unwrap();
+    }
+
+    #[test]
+    fn ingested_fetched_evidence_records_execution_receipt_and_bundle() {
+        if !inspect_command("python3", &["--version"]).available {
+            return;
+        }
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let provider_work_root = temp_work_root("osciris-ingest-provider");
+        let consumer_work_root = temp_work_root("osciris-ingest-consumer");
+        let provider_key = test_signing_key(9);
+        let provider_public = verifying_key_to_base64(&provider_key.verifying_key());
+        let job = mock_demo_job(Uuid::now_v7());
+        let provider = ProviderConfig {
+            provider_id: "provider-a".to_string(),
+            signing_key_id: "provider-a-key".to_string(),
+            signing_key_seed_base64: BASE64.encode([9_u8; 32]),
+            repo_root: std::env::current_dir().unwrap(),
+            work_root: provider_work_root.clone(),
+        };
+        let output = runtime.block_on(run_job(&job, &provider)).unwrap();
+        let mut availability = ReceiptAvailability {
+            job_id: job.job_id,
+            provider_node_id: provider.provider_id.clone(),
+            provider_ed25519_public_key_base64: provider_public,
+            execution_receipt_sha256: sha256_file(&output.execution_receipt_path).unwrap(),
+            bundle_sha256: {
+                let bundle: ReceiptBundle =
+                    serde_json::from_slice(&fs::read(&output.receipt_bundle_path).unwrap())
+                        .unwrap();
+                bundle.bundle_sha256
+            },
+            bundle_uri: format!("file://{}", output.evidence_dir.display()),
+            announced_at: "2026-06-04T00:00:00Z".to_string(),
+            signature: String::new(),
+        };
+        availability.signature = sign_receipt_availability(&availability, &provider_key).unwrap();
+
+        let consumer_store = runtime
+            .block_on(ProtocolStore::open(&consumer_work_root.join(".osciris")))
+            .unwrap();
+        let ingested = runtime
+            .block_on(ingest_fetched_evidence(
+                &consumer_store,
+                &output.evidence_dir,
+                &availability,
+            ))
+            .unwrap();
+        assert_eq!(ingested.bundle_sha256, availability.bundle_sha256);
+
+        let jobs = runtime.block_on(consumer_store.list_jobs()).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].job_id, job.job_id.to_string());
+        assert_eq!(jobs[0].status, "completed");
+        assert_eq!(
+            runtime
+                .block_on(consumer_store.load_receipt_bundle(&job.job_id.to_string()))
+                .unwrap()
+                .unwrap()
+                .bundle_sha256,
+            availability.bundle_sha256
+        );
+
+        std::fs::remove_dir_all(provider_work_root).unwrap();
+        std::fs::remove_dir_all(consumer_work_root).unwrap();
     }
 
     #[test]

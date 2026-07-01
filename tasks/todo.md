@@ -1,5 +1,49 @@
 # Task Plan
 
+## Real Receipt Ingestion
+
+### Objective
+
+Make fetched or discovered provider evidence durable as real local receipt
+state, not just downloaded files plus bundle metadata. Existing commands verify
+receipt availability signatures and bundle hashes, but they do not record the
+execution receipt itself after fetching evidence.
+
+### Spec
+
+- Reuse existing signed `ReceiptAvailability` and evidence directory format.
+- Validate execution receipt metadata, file hash, bundle metadata, recomputed
+  bundle hash, and provider signature.
+- After validation, record both the execution receipt and receipt bundle in the
+  protocol store.
+- Update existing fetch/verify-discovered commands to use the ingestion helper.
+- Keep remote HTTP/S3 bundle ingestion out of scope until transfer support is
+  implemented.
+
+### Checklist
+
+- [x] Add reusable evidence ingestion helper
+- [x] Record execution receipt during local bundle fetch
+- [x] Record execution receipt before discovered-receipt verification
+- [x] Add tests proving fetched evidence updates durable job state
+- [ ] Verify and push
+
+### Review
+
+- Added `ingest_fetched_evidence`, which validates job spec, execution receipt,
+  bundle, and provider signature, then records job state, execution receipt,
+  and receipt bundle in the local protocol store.
+- Updated `network fetch-receipt-bundle` and `network verify-discovered-receipt`
+  to call the ingestion helper before reporting success.
+- Added a regression test proving fetched evidence updates durable job state in
+  a fresh consumer store.
+- Verification passed:
+  - `cargo test -p osciris-cli ingested_fetched_evidence --locked`
+  - `cargo fmt --check`
+  - `cargo clippy -p osciris-cli --locked --all-targets -- -D warnings`
+  - `cargo test -p osciris-cli --locked`
+  - `cargo test --workspace --locked`
+
 ## Provider Matching and Execution Protocol Slice
 
 ### Objective
