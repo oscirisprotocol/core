@@ -369,7 +369,7 @@ GitHub Actions and tagged GitHub Releases.
   - `.github/workflows/release.yml` parses as YAML
   - `pnpm --dir apps/desktop tauri build`
   - local macOS bundle emitted
-    `apps/desktop/src-tauri/target/release/bundle/dmg/OSCIRIS Node_0.1.1_aarch64.dmg`
+    `apps/desktop/src-tauri/target/release/bundle/dmg/OSCIRIS Node_0.1.2_aarch64.dmg`
 
 ## Desktop Execution and Verification Completion
 
@@ -1003,7 +1003,7 @@ protocol logic in the frontend.
   - production frontend build: 199.13 kB JavaScript, 62.65 kB gzip
   - `pnpm audit --prod`: no known vulnerabilities
   - macOS arm64 `.app` build with both native executables
-  - packaged daemon reports `osciris-daemon 0.1.1`
+  - packaged daemon reports `osciris-daemon 0.1.2`
   - packaged `LICENSE` and `NOTICE` match repository files byte-for-byte
   - responsive check at `860x620`: no horizontal overflow or browser errors
 

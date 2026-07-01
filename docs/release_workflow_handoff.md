@@ -51,7 +51,7 @@ When publishing or repairing a beta release manually, prefer the repo script:
 
 ```bash
 bash scripts/run_beta_release_flow.sh \
-  --version 0.1.1 \
+  --version 0.1.2 \
   --release-notes "Beta collaboration release for colleague onboarding, published bundle sync, and release checks." \
   --asset macos-aarch64=/absolute/path/to/osciris-node \
   --asset linux-x86_64=/absolute/path/to/osciris-node \
@@ -76,7 +76,7 @@ Important behavior:
 
 For a future beta refresh, confirm all of the following:
 
-- the release version is `0.1.1` or later and Cargo metadata is `Apache-2.0`
+- the release version is `0.1.2` or later and Cargo metadata is `Apache-2.0`
 - `gh release view <tag>` shows all three expected assets
 - every release archive contains its binary, `LICENSE`, and `NOTICE`
 - `python3 scripts/verify_beta_release_surface.py --base-url https://oscirislabs.com` passes

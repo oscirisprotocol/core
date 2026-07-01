@@ -4448,7 +4448,7 @@ dependencies = [
 
 [[package]]
 name = "osciris-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4463,7 +4463,7 @@ dependencies = [
 
 [[package]]
 name = "osciris-daemon"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "alloy-primitives",
  "anyhow",
@@ -4489,7 +4489,7 @@ dependencies = [
 
 [[package]]
 name = "osciris-desktop"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "osciris-daemon",
  "serde",
@@ -4504,7 +4504,7 @@ dependencies = [
 
 [[package]]
 name = "osciris-node"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",

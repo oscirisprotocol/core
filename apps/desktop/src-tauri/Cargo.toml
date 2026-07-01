@@ -1,6 +1,6 @@
 [package]
 name = "osciris-desktop"
-version = "0.1.1"
+version = "0.1.2"
 description = "Cross-platform OSCIRIS participant node controller"
 authors = ["OSCIRIS Labs"]
 edition = "2021"
