@@ -57,8 +57,11 @@ Therefore:
 - the desktop testnet symbol defaults to `USDC_TEST`;
 - a test-token contract must be explicitly configured;
 - the UI must not describe `USDC_TEST` as Circle-issued USDC;
-- real ERC-20 job funding remains disabled while `osciris-chain` rejects
-  non-native escrow tokens.
+- `osciris-chain` can create escrow transactions for a configured ERC-20
+  payment token without attaching native value;
+- production job funding still depends on a deployed escrow contract, token
+  allowance/funding semantics, and verified test-token or mainnet-token
+  configuration.
 
 ## Investor Demo Path
 

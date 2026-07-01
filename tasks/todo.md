@@ -1,5 +1,56 @@
 # Task Plan
 
+## Protocol Settlement and Execution Backlog
+
+### Objective
+
+Continue from the desktop workspace PR by turning the next protocol gaps into
+real, verifiable backend behavior: ERC-20 job escrow, provider
+matching/execution, and receipt ingestion. Start with the smallest protocol
+slice that removes a known code-level blocker without overstating deployed
+contract capability.
+
+### Spec
+
+- Keep native-token escrow behavior unchanged.
+- Allow configured ERC-20 payment tokens to be passed to the deployed escrow
+  contract without attaching native value.
+- Validate that an existing on-chain escrow matches the requested amount,
+  verifier count, and payment token before treating creation as idempotent.
+- Keep transaction journaling, signer locking, and replay-safe resume behavior.
+- Do not invent token allowance, custody, or final settlement semantics that are
+  not exposed by the current escrow ABI.
+- Treat provider matching/execution and receipt ingestion as follow-on slices
+  after escrow creation no longer rejects ERC-20 payment tokens.
+
+### Checklist
+
+- [x] Remove the hard ERC-20 escrow rejection in `osciris-chain`
+- [x] Add payment-token validation for idempotent existing escrow checks
+- [x] Ensure native escrow attaches value and ERC-20 escrow attaches zero value
+- [x] Add targeted tests for native/ERC-20 escrow preparation logic
+- [x] Update protocol documentation and review notes
+- [x] Run targeted chain tests and broader workspace verification
+
+### Review
+
+- `osciris-chain` no longer rejects nonzero configured payment-token addresses
+  before escrow creation.
+- Native-token escrow creation still attaches the escrow amount as transaction
+  value.
+- ERC-20-token escrow creation passes the configured payment token to the
+  escrow contract and attaches zero native value.
+- Existing escrow idempotency now validates the payment token as well as amount
+  and verifier count before returning `already_created`.
+- The desktop product docs now distinguish chain-client ERC-20 support from
+  deployed contract, allowance, and verified-token requirements.
+- Targeted chain verification passed: `cargo test -p osciris-chain --locked`
+  (15 tests).
+- Formatting and strict lint verification passed: `cargo fmt --check` and
+  `cargo clippy -p osciris-chain --locked --all-targets -- -D warnings`.
+- Full Rust workspace verification passed: `cargo test --workspace --locked`
+  (72 passed, 1 ignored live-RPC test).
+
 ## Investor-Ready Compute Workspace
 
 ### Objective
