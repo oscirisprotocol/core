@@ -31,9 +31,11 @@ use osciris_core::{
     VerificationReceipt, VerificationReceiptAnnouncement,
 };
 use osciris_node::network::{
-    auto_fetch_receipts, fetch_receipt_bundle_p2p, job_matches_provider_capability,
-    peer_id_from_signing_seed, run_auto_provider, serve_presence, AutoProviderConfig,
-    AutoVerifierConfig, BundleFetchConfig, NetworkServeConfig,
+    auto_fetch_receipts, create_inference_request, fetch_receipt_bundle_p2p,
+    job_matches_provider_capability, peer_id_from_signing_seed, run_auto_provider, serve_inference,
+    serve_presence, wait_for_inference_response, AutoProviderConfig, AutoVerifierConfig,
+    BundleFetchConfig, InferenceServeConfig, InferenceSubmitConfig, InferenceWaitConfig,
+    NetworkServeConfig,
 };
 use osciris_node::status::{
     build_provider_network_status, calculate_quorum_status, calculate_settlement_status,
@@ -241,6 +243,10 @@ enum Commands {
     Network {
         #[command(subcommand)]
         command: NetworkCommands,
+    },
+    Inference {
+        #[command(subcommand)]
+        command: InferenceCommands,
     },
 }
 
@@ -713,6 +719,70 @@ enum NetworkCommands {
         presence_interval_seconds: u64,
         #[arg(long, default_value_t = 60)]
         run_seconds: u64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum InferenceCommands {
+    Serve {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        signing_key_seed_base64: Option<String>,
+        #[arg(long)]
+        signing_key_seed_file: Option<PathBuf>,
+        #[arg(long)]
+        provider_id: String,
+        #[arg(long)]
+        profile_id: String,
+        #[arg(long, default_value = "/ip4/127.0.0.1/tcp/0")]
+        listen_addr: String,
+        #[arg(long = "bootstrap-peer")]
+        bootstrap_peers: Vec<String>,
+        #[arg(long, default_value_t = 30)]
+        run_seconds: u64,
+    },
+    Submit {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        signing_key_seed_base64: String,
+        #[arg(long)]
+        requester_id: String,
+        #[arg(long)]
+        profile_id: String,
+        #[arg(long)]
+        prompt_file: PathBuf,
+        #[arg(long, default_value_t = 256)]
+        max_output_tokens: u32,
+        #[arg(long)]
+        provider_peer_id: String,
+        #[arg(long, default_value = "/ip4/127.0.0.1/tcp/0")]
+        listen_addr: String,
+        #[arg(long = "bootstrap-peer")]
+        bootstrap_peers: Vec<String>,
+        #[arg(long, default_value_t = 180)]
+        timeout_seconds: u64,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    Wait {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        signing_key_seed_base64: String,
+        #[arg(long)]
+        request_json: PathBuf,
+        #[arg(long)]
+        provider_peer_id: String,
+        #[arg(long, default_value = "/ip4/127.0.0.1/tcp/0")]
+        listen_addr: String,
+        #[arg(long = "bootstrap-peer")]
+        bootstrap_peers: Vec<String>,
+        #[arg(long, default_value_t = 180)]
+        timeout_seconds: u64,
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -2149,6 +2219,97 @@ fn main() -> Result<()> {
                     presence_interval: Duration::from_secs(presence_interval_seconds),
                     run_for: Duration::from_secs(run_seconds),
                 }))?;
+                print_json(&summary)?;
+            }
+        },
+        Commands::Inference { command } => match command {
+            InferenceCommands::Serve {
+                work_root,
+                signing_key_seed_base64,
+                signing_key_seed_file,
+                provider_id,
+                profile_id,
+                listen_addr,
+                bootstrap_peers,
+                run_seconds,
+            } => {
+                let signing_key_seed_base64 =
+                    load_signing_seed_from_source(signing_key_seed_base64, signing_key_seed_file)?;
+                let summary = runtime.block_on(serve_inference(&InferenceServeConfig {
+                    protocol_root: work_root.join(".osciris"),
+                    signing_key_seed_base64,
+                    provider_id,
+                    profile_id,
+                    listen_addr,
+                    bootstrap_peers,
+                    run_for: Duration::from_secs(run_seconds),
+                }))?;
+                print_json(&summary)?;
+            }
+            InferenceCommands::Submit {
+                work_root,
+                signing_key_seed_base64,
+                requester_id,
+                profile_id,
+                prompt_file,
+                max_output_tokens,
+                provider_peer_id,
+                listen_addr,
+                bootstrap_peers,
+                timeout_seconds,
+                output,
+            } => {
+                let prompt = fs::read_to_string(&prompt_file)
+                    .with_context(|| format!("failed to read {}", prompt_file.display()))?;
+                fs::create_dir_all(work_root.join(".osciris").join("inference"))?;
+                let request = create_inference_request(&InferenceSubmitConfig {
+                    signing_key_seed_base64: signing_key_seed_base64.clone(),
+                    requester_id,
+                    profile_id,
+                    prompt,
+                    max_output_tokens,
+                })?;
+                let summary =
+                    runtime.block_on(wait_for_inference_response(&InferenceWaitConfig {
+                        signing_key_seed_base64,
+                        request: request.clone(),
+                        provider_peer_id,
+                        listen_addr,
+                        bootstrap_peers,
+                        timeout: Duration::from_secs(timeout_seconds),
+                    }))?;
+                if let Some(output) = output {
+                    fs::write(&output, serde_json::to_vec_pretty(&summary)?)?;
+                }
+                print_json(&summary)?;
+            }
+            InferenceCommands::Wait {
+                work_root,
+                signing_key_seed_base64,
+                request_json,
+                provider_peer_id,
+                listen_addr,
+                bootstrap_peers,
+                timeout_seconds,
+                output,
+            } => {
+                fs::create_dir_all(work_root.join(".osciris").join("inference"))?;
+                let request: osciris_core::InferenceRequest = serde_json::from_slice(
+                    &fs::read(&request_json)
+                        .with_context(|| format!("failed to read {}", request_json.display()))?,
+                )?;
+                let summary =
+                    runtime.block_on(wait_for_inference_response(&InferenceWaitConfig {
+                        signing_key_seed_base64,
+                        request,
+                        provider_peer_id,
+                        listen_addr,
+                        bootstrap_peers,
+                        timeout: Duration::from_secs(timeout_seconds),
+                    }))?;
+                if let Some(output) = output {
+                    fs::write(&output, serde_json::to_vec_pretty(&summary)?)?;
+                }
                 print_json(&summary)?;
             }
         },

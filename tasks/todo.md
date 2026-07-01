@@ -1,5 +1,72 @@
 # Task Plan
 
+## Interactive Remote Inference Transport
+
+### Objective
+
+Implement the missing prompt-to-another-machine path: a developer submits a
+prompt, a remote provider peer receives it over OSCIRIS peer transport, produces
+a signed response, and the developer can wait for/display the response. Then
+expose that path through daemon/Desktop.
+
+### Spec
+
+- Add backend inference request/result protocol types with:
+  - request ID
+  - profile ID
+  - prompt text
+  - max output tokens
+  - requester public key
+  - provider ID/public key
+  - request/result commitments
+  - provider signature
+- Add a libp2p request-response protocol separate from receipt-bundle transfer.
+- Add CLI commands:
+  - `osciris-node inference serve`
+  - `osciris-node inference submit`
+  - `osciris-node inference wait`
+- First vertical slice may use a deterministic provider runtime adapter to
+  prove remote transport and signing; model-server supervision is a follow-up
+  in the same objective, not considered complete until implemented.
+- Add daemon/Desktop network controls and prompt submission/result display once
+  backend commands exist.
+- Keep prompts/results off public gossipsub/status records.
+
+### Checklist
+
+- [x] Add core inference request/result data structures and signatures
+- [x] Add libp2p inference request-response protocol
+- [x] Add CLI `inference serve/submit/wait`
+- [ ] Add provider model-server supervisor for pinned profile
+- [ ] Add daemon/Desktop network join/start controls
+- [ ] Add desktop prompt submission and response display
+- [x] Verify local and multi-process transport tests
+
+### Review
+
+- Added signed `InferenceRequest` and `InferenceResponse` core protocol types,
+  plus request/result commitment helpers and signature verification.
+- Added `/osciris/inference/0.1.0` libp2p request-response protocol alongside
+  existing receipt-bundle transfer.
+- Added backend functions to create signed requests, serve inference requests,
+  and wait for signed responses from a provider peer.
+- Added CLI command surface:
+  - `osciris-node inference serve`
+  - `osciris-node inference submit`
+  - `osciris-node inference wait`
+- First provider runtime is deterministic test inference. It proves peer
+  transport, request verification, response signing, and result commitments.
+  Pinned Qwen/llama.cpp model supervision is still pending.
+- Verification passed:
+  - `cargo test -p osciris-node inference_request_response_signatures_verify --locked -- --nocapture`
+  - `cargo test -p osciris-core inference_request_and_response_signatures_round_trip --locked -- --nocapture`
+  - local two-process loopback CLI round trip from `inference submit` to
+    `inference serve`
+  - `cargo fmt --check`
+  - `cargo test -p osciris-core --locked`
+  - `cargo test -p osciris-node --locked`
+  - `cargo check -p osciris-cli --locked`
+
 ## Desktop Remote Prompt Test Inference
 
 ### Objective

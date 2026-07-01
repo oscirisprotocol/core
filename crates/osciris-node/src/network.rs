@@ -28,14 +28,17 @@ use libp2p::request_response::{
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, StreamProtocol, SwarmBuilder};
 use osciris_core::{
-    bundle_hash, load_signing_key_from_base64_seed, sha256_file, sign_job_announcement,
-    sign_job_claim, sign_peer_presence, sign_provider_capability, sign_receipt_availability,
-    verify_job_announcement_signature, verify_job_assignment_signature, verify_job_claim_signature,
-    verify_peer_presence_signature, verify_provider_capability_signature,
-    verify_receipt_availability_signature, verify_verification_receipt_signature,
-    verifying_key_from_base64, ExecutionReceipt, JobAnnouncement, JobAssignment, JobClaim,
-    NodeIdentity, NodeStatus, PeerPresence, ProviderCapability, ReceiptAvailability, ReceiptBundle,
-    VerificationReceipt, VerificationReceiptAnnouncement,
+    bundle_hash, inference_request_commitment, inference_response_commitment,
+    load_signing_key_from_base64_seed, sha256_file, sign_inference_request,
+    sign_inference_response, sign_job_announcement, sign_job_claim, sign_peer_presence,
+    sign_provider_capability, sign_receipt_availability, verify_inference_request_signature,
+    verify_inference_response_signature, verify_job_announcement_signature,
+    verify_job_assignment_signature, verify_job_claim_signature, verify_peer_presence_signature,
+    verify_provider_capability_signature, verify_receipt_availability_signature,
+    verify_verification_receipt_signature, verifying_key_from_base64, verifying_key_to_base64,
+    ExecutionReceipt, InferenceRequest, InferenceResponse, JobAnnouncement, JobAssignment,
+    JobClaim, NodeIdentity, NodeStatus, PeerPresence, ProviderCapability, ReceiptAvailability,
+    ReceiptBundle, VerificationReceipt, VerificationReceiptAnnouncement,
 };
 use tar::{Archive, Builder};
 use tracing::{info, warn};
@@ -51,6 +54,7 @@ const JOB_ASSIGNMENT_TOPIC: &str = "osciris/jobs/assignments";
 const RECEIPT_AVAILABILITY_TOPIC: &str = "osciris/jobs/receipts";
 const VERIFICATION_RECEIPT_TOPIC: &str = "osciris/jobs/verifications";
 const BUNDLE_TRANSFER_PROTOCOL: &str = "/osciris/bundle-transfer/0.1.0";
+const INFERENCE_PROTOCOL: &str = "/osciris/inference/0.1.0";
 
 #[derive(Debug, Clone)]
 pub struct NetworkServeConfig {
@@ -69,6 +73,7 @@ pub struct NetworkServeConfig {
 struct OscirisBehaviour {
     gossipsub: Gossipsub,
     bundle_transfer: RequestResponse<BundleTransferCodec>,
+    inference: RequestResponse<InferenceCodec>,
     identify: Identify,
     ping: Ping,
 }
@@ -125,6 +130,50 @@ pub struct AutoProviderConfig {
     pub bootstrap_peers: Vec<String>,
     pub presence_interval: Duration,
     pub run_for: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct InferenceServeConfig {
+    pub protocol_root: PathBuf,
+    pub signing_key_seed_base64: String,
+    pub provider_id: String,
+    pub profile_id: String,
+    pub listen_addr: String,
+    pub bootstrap_peers: Vec<String>,
+    pub run_for: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct InferenceSubmitConfig {
+    pub signing_key_seed_base64: String,
+    pub requester_id: String,
+    pub profile_id: String,
+    pub prompt: String,
+    pub max_output_tokens: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct InferenceWaitConfig {
+    pub signing_key_seed_base64: String,
+    pub request: InferenceRequest,
+    pub provider_peer_id: String,
+    pub listen_addr: String,
+    pub bootstrap_peers: Vec<String>,
+    pub timeout: Duration,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InferenceServeSummary {
+    pub peer_id: String,
+    pub provider_id: String,
+    pub served_request_count: u32,
+    pub request_ids: Vec<uuid::Uuid>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InferenceSubmitSummary {
+    pub request: InferenceRequest,
+    pub response: InferenceResponse,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -194,11 +243,26 @@ struct BundleTransferCodec {
     response_size_maximum: u64,
 }
 
+#[derive(Debug, Clone)]
+struct InferenceCodec {
+    request_size_maximum: u64,
+    response_size_maximum: u64,
+}
+
 impl Default for BundleTransferCodec {
     fn default() -> Self {
         Self {
             request_size_maximum: 1024 * 1024,
             response_size_maximum: 128 * 1024 * 1024,
+        }
+    }
+}
+
+impl Default for InferenceCodec {
+    fn default() -> Self {
+        Self {
+            request_size_maximum: 1024 * 1024,
+            response_size_maximum: 4 * 1024 * 1024,
         }
     }
 }
@@ -278,6 +342,65 @@ impl RequestResponseCodec for BundleTransferCodec {
     }
 }
 
+#[async_trait]
+impl RequestResponseCodec for InferenceCodec {
+    type Protocol = StreamProtocol;
+    type Request = InferenceRequest;
+    type Response = InferenceResponse;
+
+    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let mut bytes = Vec::new();
+        io.take(self.request_size_maximum)
+            .read_to_end(&mut bytes)
+            .await?;
+        serde_json::from_slice(&bytes).map_err(invalid_data)
+    }
+
+    async fn read_response<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+    ) -> io::Result<Self::Response>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let mut bytes = Vec::new();
+        io.take(self.response_size_maximum)
+            .read_to_end(&mut bytes)
+            .await?;
+        serde_json::from_slice(&bytes).map_err(invalid_data)
+    }
+
+    async fn write_request<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+        request: Self::Request,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let bytes = serde_json::to_vec(&request).map_err(invalid_data)?;
+        io.write_all(&bytes).await
+    }
+
+    async fn write_response<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+        response: Self::Response,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let bytes = serde_json::to_vec(&response).map_err(invalid_data)?;
+        io.write_all(&bytes).await
+    }
+}
+
 fn invalid_data(error: serde_json::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
@@ -287,6 +410,228 @@ pub fn peer_id_from_signing_seed(seed_base64: &str) -> Result<String> {
     let keypair = identity::Keypair::ed25519_from_bytes(signing_key.to_bytes())
         .map_err(anyhow::Error::new)?;
     Ok(PeerId::from_public_key(&keypair.public()).to_string())
+}
+
+pub fn create_inference_request(config: &InferenceSubmitConfig) -> Result<InferenceRequest> {
+    let signing_key = load_signing_key_from_base64_seed(&config.signing_key_seed_base64)?;
+    let request_sha256 =
+        inference_request_commitment(&config.profile_id, &config.prompt, config.max_output_tokens);
+    let mut request = InferenceRequest {
+        request_id: uuid::Uuid::now_v7(),
+        profile_id: config.profile_id.clone(),
+        prompt: config.prompt.clone(),
+        max_output_tokens: config.max_output_tokens,
+        requester_node_id: config.requester_id.clone(),
+        requester_ed25519_public_key_base64: verifying_key_to_base64(&signing_key.verifying_key()),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        request_sha256,
+        signature: String::new(),
+    };
+    request.signature = sign_inference_request(&request, &signing_key)?;
+    Ok(request)
+}
+
+pub async fn serve_inference(config: &InferenceServeConfig) -> Result<InferenceServeSummary> {
+    let signing_key = load_signing_key_from_base64_seed(&config.signing_key_seed_base64)?;
+    let mut swarm = build_network_swarm(&signing_key)?;
+    let listen_addr: Multiaddr = config.listen_addr.parse()?;
+    swarm.listen_on(listen_addr)?;
+    let bootstrap_addrs = config
+        .bootstrap_peers
+        .iter()
+        .map(|bootstrap| bootstrap.parse::<Multiaddr>())
+        .collect::<Result<Vec<_>, _>>()?;
+    for addr in &bootstrap_addrs {
+        dial_bootstrap(&mut swarm, addr);
+    }
+    let end_at = tokio::time::Instant::now() + config.run_for;
+    let mut served_request_count = 0_u32;
+    let mut request_ids = Vec::new();
+
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(end_at) => break,
+            event = swarm.select_next_some() => {
+                match event {
+                    SwarmEvent::Behaviour(OscirisBehaviourEvent::Inference(
+                        RequestResponseEvent::Message {
+                            peer,
+                            message: RequestResponseMessage::Request { request, channel, .. },
+                            ..
+                        },
+                    )) => {
+                        let response = build_inference_response(&request, config, &signing_key);
+                        match response {
+                            Ok(response) => {
+                                request_ids.push(response.request_id);
+                                served_request_count += 1;
+                                if let Err(_response) = swarm.behaviour_mut().inference.send_response(channel, response) {
+                                    warn!("failed to send inference response to {peer}");
+                                }
+                            }
+                            Err(error) => {
+                                warn!("failed to build inference response for {peer}: {error}");
+                            }
+                        }
+                    }
+                    SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                        info!("inference serve outgoing connection retry to {:?} did not complete: {error}", peer_id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok(InferenceServeSummary {
+        peer_id: swarm.local_peer_id().to_string(),
+        provider_id: config.provider_id.clone(),
+        served_request_count,
+        request_ids,
+    })
+}
+
+pub async fn wait_for_inference_response(
+    config: &InferenceWaitConfig,
+) -> Result<InferenceSubmitSummary> {
+    let requester_key =
+        verifying_key_from_base64(&config.request.requester_ed25519_public_key_base64)?;
+    verify_inference_request_signature(&config.request, &requester_key)?;
+    let signing_key = load_signing_key_from_base64_seed(&config.signing_key_seed_base64)?;
+    let mut swarm = build_network_swarm(&signing_key)?;
+    let listen_addr: Multiaddr = config.listen_addr.parse()?;
+    swarm.listen_on(listen_addr)?;
+    let bootstrap_addrs = config
+        .bootstrap_peers
+        .iter()
+        .map(|bootstrap| bootstrap.parse::<Multiaddr>())
+        .collect::<Result<Vec<_>, _>>()?;
+    for addr in &bootstrap_addrs {
+        dial_bootstrap(&mut swarm, addr);
+    }
+    let provider_peer: PeerId = config.provider_peer_id.parse()?;
+    let timeout_at = tokio::time::Instant::now() + config.timeout;
+    let mut pending_request_id = None;
+
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(timeout_at) => {
+                bail!("inference response timed out after {:?}", config.timeout);
+            }
+            event = swarm.select_next_some() => {
+                match event {
+                    SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == provider_peer && pending_request_id.is_none() => {
+                        pending_request_id = Some(
+                            swarm
+                                .behaviour_mut()
+                                .inference
+                                .send_request(&provider_peer, config.request.clone()),
+                        );
+                    }
+                    SwarmEvent::Behaviour(OscirisBehaviourEvent::Inference(event)) => {
+                        match event {
+                            RequestResponseEvent::Message { message, .. } => {
+                                if let RequestResponseMessage::Response { request_id, response } = message {
+                                    if Some(request_id) == pending_request_id {
+                                        let provider_key = verifying_key_from_base64(&response.provider_ed25519_public_key_base64)?;
+                                        verify_inference_response_signature(&response, &provider_key)?;
+                                        if response.request_id != config.request.request_id {
+                                            bail!("inference response request_id did not match request");
+                                        }
+                                        if response.request_sha256 != config.request.request_sha256 {
+                                            bail!("inference response request commitment did not match request");
+                                        }
+                                        return Ok(InferenceSubmitSummary {
+                                            request: config.request.clone(),
+                                            response,
+                                        });
+                                    }
+                                }
+                            }
+                            RequestResponseEvent::OutboundFailure { error, .. } => {
+                                bail!("inference request failed: {error}");
+                            }
+                            RequestResponseEvent::InboundFailure { peer, error, .. } => {
+                                warn!("inbound inference failure from {peer}: {error}");
+                            }
+                            RequestResponseEvent::ResponseSent { .. } => {}
+                        }
+                    }
+                    SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                        info!("inference wait outgoing connection retry to {:?} did not complete: {error}", peer_id);
+                    }
+                    _ => {
+                        if pending_request_id.is_none() {
+                            for addr in &bootstrap_addrs {
+                                dial_bootstrap(&mut swarm, addr);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn build_inference_response(
+    request: &InferenceRequest,
+    config: &InferenceServeConfig,
+    signing_key: &ed25519_dalek::SigningKey,
+) -> Result<InferenceResponse> {
+    let requester_key = verifying_key_from_base64(&request.requester_ed25519_public_key_base64)?;
+    verify_inference_request_signature(request, &requester_key)?;
+    if request.profile_id != config.profile_id {
+        bail!(
+            "provider profile {} cannot serve request profile {}",
+            config.profile_id,
+            request.profile_id
+        );
+    }
+    let expected_request_sha256 = inference_request_commitment(
+        &request.profile_id,
+        &request.prompt,
+        request.max_output_tokens,
+    );
+    if request.request_sha256 != expected_request_sha256 {
+        bail!("inference request commitment mismatch");
+    }
+    let response_text = deterministic_inference_response(request);
+    let mut response = InferenceResponse {
+        request_id: request.request_id,
+        profile_id: request.profile_id.clone(),
+        provider_node_id: config.provider_id.clone(),
+        provider_ed25519_public_key_base64: verifying_key_to_base64(&signing_key.verifying_key()),
+        response_sha256: inference_response_commitment(&request.request_sha256, &response_text),
+        response_text,
+        request_sha256: request.request_sha256.clone(),
+        prompt_tokens: rough_token_count(&request.prompt),
+        output_tokens: 0,
+        latency_ms: 0,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        signature: String::new(),
+    };
+    response.output_tokens = rough_token_count(&response.response_text);
+    response.signature = sign_inference_response(&response, signing_key)?;
+    Ok(response)
+}
+
+fn deterministic_inference_response(request: &InferenceRequest) -> String {
+    let trimmed = request.prompt.trim();
+    let bounded = if trimmed.len() > 240 {
+        format!("{}…", &trimmed[..240])
+    } else {
+        trimmed.to_string()
+    };
+    format!(
+        "[osciris-test-inference:{}] Received {} chars. Prompt: {}",
+        request.profile_id,
+        request.prompt.chars().count(),
+        bounded
+    )
+}
+
+fn rough_token_count(text: &str) -> u32 {
+    text.split_whitespace().count().min(u32::MAX as usize) as u32
 }
 
 fn build_network_swarm(
@@ -318,9 +663,18 @@ fn build_network_swarm(
         )],
         RequestResponseConfig::default().with_request_timeout(Duration::from_secs(30)),
     );
+    let inference = RequestResponse::with_codec(
+        InferenceCodec::default(),
+        [(
+            StreamProtocol::new(INFERENCE_PROTOCOL),
+            ProtocolSupport::Full,
+        )],
+        RequestResponseConfig::default().with_request_timeout(Duration::from_secs(180)),
+    );
     let behaviour = OscirisBehaviour {
         gossipsub,
         bundle_transfer,
+        inference,
         identify: Identify::new(IdentifyConfig::new(
             "/osciris/0.1.0".to_string(),
             keypair.public(),
@@ -2250,6 +2604,38 @@ mod tests {
         let seed = BASE64.encode([byte; 32]);
         let signing_key = load_signing_key_from_base64_seed(&seed).unwrap();
         verifying_key_to_base64(&signing_key.verifying_key())
+    }
+
+    #[test]
+    fn inference_request_response_signatures_verify() {
+        let requester_seed = BASE64.encode([21_u8; 32]);
+        let provider_seed = BASE64.encode([22_u8; 32]);
+        let request = create_inference_request(&InferenceSubmitConfig {
+            signing_key_seed_base64: requester_seed,
+            requester_id: "developer-1".to_string(),
+            profile_id: "osciris-test-profile".to_string(),
+            prompt: "Explain a public function.".to_string(),
+            max_output_tokens: 64,
+        })
+        .unwrap();
+        let provider_key = load_signing_key_from_base64_seed(&provider_seed).unwrap();
+        let response = build_inference_response(
+            &request,
+            &InferenceServeConfig {
+                protocol_root: PathBuf::from("/tmp/unused"),
+                signing_key_seed_base64: provider_seed,
+                provider_id: "provider-1".to_string(),
+                profile_id: "osciris-test-profile".to_string(),
+                listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
+                bootstrap_peers: vec![],
+                run_for: Duration::from_secs(1),
+            },
+            &provider_key,
+        )
+        .unwrap();
+        assert_eq!(response.request_id, request.request_id);
+        assert_eq!(response.request_sha256, request.request_sha256);
+        verify_inference_response_signature(&response, &provider_key.verifying_key()).unwrap();
     }
 
     #[test]
