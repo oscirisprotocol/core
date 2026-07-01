@@ -60,6 +60,14 @@ async fn publish_job(job_id: String) -> Result<DesktopJob, String> {
 }
 
 #[tauri::command]
+async fn match_provider(job_id: String) -> Result<WorkspaceSnapshot, String> {
+    DaemonClient::default_for_user()
+        .match_provider(job_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn refresh_protocol_jobs() -> Result<WorkspaceSnapshot, String> {
     DaemonClient::default_for_user()
         .refresh_protocol_jobs()
@@ -176,6 +184,7 @@ pub fn run() {
             daemon_status,
             ingest_evidence,
             launch_daemon,
+            match_provider,
             prepare_withdrawal,
             publish_job,
             refresh_protocol_jobs,

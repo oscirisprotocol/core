@@ -1,5 +1,59 @@
 # Task Plan
 
+## Desktop Provider Matching
+
+### Objective
+
+Expose the backend automatic provider-assignment path through the daemon and
+desktop UI so a published desktop job can be matched without dropping to CLI.
+
+### Spec
+
+- Add a daemon command accepting a desktop `job_id`.
+- Load the daemon protocol store announcement and provider claims for that job.
+- Reuse the CLI trust checks: signed job announcement, signed claim, signed
+  provider capability, key consistency, online provider status, and capability
+  fit.
+- Deterministically select the best valid claimant by load, active jobs,
+  claim time, and provider ID.
+- Sign and persist the assignment with the daemon protocol identity.
+- Refresh desktop protocol state so the job shows assigned provider/running.
+- Add desktop job-detail action for queued/matching jobs.
+
+### Checklist
+
+- [x] Add daemon matching command and selector
+- [x] Add regression coverage with signed claims/capabilities
+- [x] Add Tauri/TypeScript bindings and job-detail action
+- [x] Verify daemon, frontend, and native Tauri checks
+- [x] Update review notes and push
+
+### Review
+
+- Added daemon `MatchProvider` command and client wrapper.
+- Matching loads the signed job announcement, existing provider claims, and
+  provider capabilities from the daemon protocol store.
+- Matching validates job announcement signature, claim signature, provider
+  capability signature, provider key consistency, online provider status, and
+  capability fit before assigning.
+- Candidate ranking matches the CLI path: lowest current load, lowest active
+  jobs, earliest claim timestamp, then provider ID.
+- Daemon signs and stores the assignment with its protocol identity, then
+  refreshes desktop protocol state.
+- Added Tauri/TypeScript bindings and a `Match provider` job-detail action for
+  queued/matching jobs.
+- Added regression coverage with signed claims/capabilities proving the
+  lowest-load valid provider is assigned and the assignment signature verifies.
+- Verification passed:
+  - `cargo test -p osciris-daemon match_provider_records_lowest_load_assignment --locked -- --nocapture`
+  - `cargo fmt --check`
+  - `cargo test --locked -p osciris-daemon`
+  - `cargo clippy -p osciris-daemon --locked --all-targets -- -D warnings`
+  - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop prepare:sidecar:debug`
+  - `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  - `pnpm --dir apps/desktop tauri build`
+
 ## Desktop Evidence Ingestion UI
 
 ### Objective

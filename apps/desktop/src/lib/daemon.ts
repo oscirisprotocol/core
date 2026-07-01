@@ -163,6 +163,10 @@ export function publishJob(jobId: string): Promise<DesktopJob> {
   return invoke<DesktopJob>("publish_job", { jobId });
 }
 
+export function matchProvider(jobId: string): Promise<WorkspaceSnapshot> {
+  return invoke<WorkspaceSnapshot>("match_provider", { jobId });
+}
+
 export function refreshProtocolJobs(): Promise<WorkspaceSnapshot> {
   return invoke<WorkspaceSnapshot>("refresh_protocol_jobs");
 }

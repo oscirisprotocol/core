@@ -553,6 +553,7 @@ export function JobDetailView({
   onBack,
   onSubmit,
   onPublish,
+  onMatchProvider,
   onIngestEvidence,
 }: {
   job: DesktopJob;
@@ -560,9 +561,11 @@ export function JobDetailView({
   onBack: () => void;
   onSubmit: (jobId: string) => void;
   onPublish: (jobId: string) => void;
+  onMatchProvider: (jobId: string) => void;
   onIngestEvidence: (jobId: string) => void;
 }) {
   const current = lifecycle.indexOf(job.state);
+  const canMatchProvider = ["queued", "matching"].includes(job.state);
   const canIngestEvidence = ["queued", "matching", "running", "verifying"].includes(
     job.state,
   );
@@ -592,6 +595,16 @@ export function JobDetailView({
               type="button"
             >
               Publish protocol job
+            </button>
+          ) : null}
+          {canMatchProvider ? (
+            <button
+              className="primary-button"
+              disabled={busy}
+              onClick={() => onMatchProvider(job.job_id)}
+              type="button"
+            >
+              Match provider
             </button>
           ) : null}
           {canIngestEvidence ? (

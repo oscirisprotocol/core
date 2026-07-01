@@ -31,10 +31,13 @@ use tokio_util::codec::{Framed, LinesCodec};
 
 use osciris_core::{
     bundle_hash, load_signing_key_from_base64_seed, sha256_file, sign_job_announcement,
-    verify_execution_receipt_signature, verify_receipt_availability_signature,
-    verifying_key_from_base64, verifying_key_to_base64, ExecutionReceipt, JobAnnouncement, JobSpec,
-    JobType, PrivacyMode, PrivacyPolicy, ReceiptAvailability, ReceiptBundle,
+    sign_job_assignment, verify_execution_receipt_signature, verify_job_announcement_signature,
+    verify_job_claim_signature, verify_provider_capability_signature,
+    verify_receipt_availability_signature, verifying_key_from_base64, verifying_key_to_base64,
+    ExecutionReceipt, JobAnnouncement, JobAssignment, JobClaim, JobSpec, JobType, NodeStatus,
+    PrivacyMode, PrivacyPolicy, ProviderCapability, ReceiptAvailability, ReceiptBundle,
 };
+use osciris_node::network::job_matches_provider_capability;
 use osciris_node::status::calculate_quorum_status;
 use osciris_node::store::ProtocolStore;
 
@@ -172,6 +175,7 @@ pub enum DaemonCommand {
     CreateJob { input: CreateJobInput },
     SubmitJob { job_id: String },
     PublishJob { job_id: String },
+    MatchProvider { job_id: String },
     RefreshProtocolJobs,
     IngestEvidence { input: EvidenceIngestionInput },
     ConfigureWallet { input: WalletConfigInput },
@@ -532,6 +536,16 @@ impl DaemonService {
                     error.to_string(),
                 ),
             },
+            DaemonCommand::MatchProvider { job_id } => match self.match_provider(&job_id).await {
+                Ok(workspace) => {
+                    DaemonResponse::success(request.request_id, DaemonResult::Workspace(workspace))
+                }
+                Err(error) => DaemonResponse::error(
+                    request.request_id,
+                    "provider_matching_failed",
+                    error.to_string(),
+                ),
+            },
             DaemonCommand::RefreshProtocolJobs => match self.refresh_protocol_jobs().await {
                 Ok(workspace) => {
                     DaemonResponse::success(request.request_id, DaemonResult::Workspace(workspace))
@@ -721,6 +735,68 @@ impl DaemonService {
         let job = job.clone();
         persist_state(&self.inner.state_dir, &state)?;
         Ok(job)
+    }
+
+    async fn match_provider(&self, job_id: &str) -> Result<WorkspaceSnapshot> {
+        let parsed_job_id =
+            uuid::Uuid::parse_str(job_id).context("desktop job ID is not a UUID")?;
+        {
+            let state = self.inner.state.read().await;
+            let job = state
+                .jobs
+                .iter()
+                .find(|candidate| candidate.job_id == job_id)
+                .ok_or_else(|| anyhow!("job {job_id} was not found"))?;
+            if !matches!(
+                job.state,
+                DesktopJobState::Queued | DesktopJobState::Matching
+            ) {
+                bail!("only queued or matching jobs can be matched");
+            }
+        }
+
+        let protocol_store = ProtocolStore::open(&self.inner.state_dir.join("protocol"))
+            .await
+            .context("open daemon protocol store")?;
+        let announcement = protocol_store
+            .load_job_announcement(job_id)
+            .await
+            .context("load protocol job announcement")?
+            .ok_or_else(|| anyhow!("cannot match unpublished job {job_id}"))?;
+        validate_job_announcement(&announcement)?;
+        if let Some(existing) = protocol_store
+            .load_job_assignment(job_id)
+            .await
+            .context("load existing job assignment")?
+        {
+            if existing.job_id != parsed_job_id {
+                bail!("stored assignment job_id does not match requested job");
+            }
+            return self.refresh_protocol_jobs().await;
+        }
+
+        let claims = protocol_store
+            .load_job_claims_by_job(job_id)
+            .await
+            .context("load provider claims")?;
+        let selected = select_provider_match(&announcement, &claims, &protocol_store).await?;
+        let mut assignment = JobAssignment {
+            job_id: parsed_job_id,
+            assigned_provider_node_id: selected.provider_node_id,
+            assigner_node_id: "desktop-workspace".to_string(),
+            assigner_ed25519_public_key_base64: verifying_key_to_base64(
+                &self.inner.protocol_identity.verifying_key(),
+            ),
+            assignment_reason: "desktop_auto_match".to_string(),
+            assigned_at: Utc::now().to_rfc3339(),
+            signature: String::new(),
+        };
+        assignment.signature = sign_job_assignment(&assignment, &self.inner.protocol_identity)?;
+        protocol_store
+            .record_job_assignment(&assignment)
+            .await
+            .context("record job assignment")?;
+        self.refresh_protocol_jobs().await
     }
 
     async fn refresh_protocol_jobs(&self) -> Result<WorkspaceSnapshot> {
@@ -1175,6 +1251,13 @@ impl DaemonClient {
         }
     }
 
+    pub async fn match_provider(&self, job_id: String) -> Result<WorkspaceSnapshot> {
+        match self.send(DaemonCommand::MatchProvider { job_id }).await? {
+            DaemonResult::Workspace(workspace) => Ok(workspace),
+            result => bail!("unexpected daemon result: {result:?}"),
+        }
+    }
+
     pub async fn refresh_protocol_jobs(&self) -> Result<WorkspaceSnapshot> {
         match self.send(DaemonCommand::RefreshProtocolJobs).await? {
             DaemonResult::Workspace(workspace) => Ok(workspace),
@@ -1497,6 +1580,98 @@ fn desktop_required_capability(profile: &str) -> String {
 }
 
 #[derive(Debug, Clone)]
+struct ProviderMatchCandidate {
+    provider_node_id: String,
+    current_load: f64,
+    active_job_count: u32,
+    claimed_at: String,
+}
+
+async fn select_provider_match(
+    announcement: &JobAnnouncement,
+    claims: &[JobClaim],
+    store: &ProtocolStore,
+) -> Result<ProviderMatchCandidate> {
+    let mut candidates = Vec::new();
+    for claim in claims {
+        if claim.job_id != announcement.job_id {
+            continue;
+        }
+        let Some(capability) = store
+            .load_provider_capability(&claim.provider_node_id)
+            .await
+            .context("load provider capability")?
+        else {
+            continue;
+        };
+        if let Some(candidate) =
+            validate_provider_match_candidate(announcement, claim, &capability)?
+        {
+            candidates.push(candidate);
+        }
+    }
+    candidates.sort_by(compare_provider_match_candidates);
+    candidates.into_iter().next().with_context(|| {
+        format!(
+            "no valid provider claims matched job {} and capability {}",
+            announcement.job_id, announcement.required_capability
+        )
+    })
+}
+
+fn validate_provider_match_candidate(
+    announcement: &JobAnnouncement,
+    claim: &JobClaim,
+    capability: &ProviderCapability,
+) -> Result<Option<ProviderMatchCandidate>> {
+    if capability.node_id != claim.provider_node_id {
+        return Ok(None);
+    }
+    if capability.ed25519_public_key_base64 != claim.provider_ed25519_public_key_base64 {
+        return Ok(None);
+    }
+    let provider_key = verifying_key_from_base64(&claim.provider_ed25519_public_key_base64)
+        .context("failed to decode provider claim public key")?;
+    verify_job_claim_signature(claim, &provider_key).context("provider claim signature invalid")?;
+    verify_provider_capability_signature(capability, &provider_key)
+        .context("provider capability signature invalid")?;
+    if !matches!(
+        capability.status,
+        NodeStatus::OnlineIdle | NodeStatus::OnlineBusy
+    ) {
+        return Ok(None);
+    }
+    if !job_matches_provider_capability(announcement, capability) {
+        return Ok(None);
+    }
+    Ok(Some(ProviderMatchCandidate {
+        provider_node_id: claim.provider_node_id.clone(),
+        current_load: capability.current_load,
+        active_job_count: capability.active_job_count,
+        claimed_at: claim.claimed_at.clone(),
+    }))
+}
+
+fn compare_provider_match_candidates(
+    left: &ProviderMatchCandidate,
+    right: &ProviderMatchCandidate,
+) -> std::cmp::Ordering {
+    left.current_load
+        .total_cmp(&right.current_load)
+        .then_with(|| left.active_job_count.cmp(&right.active_job_count))
+        .then_with(|| left.claimed_at.cmp(&right.claimed_at))
+        .then_with(|| left.provider_node_id.cmp(&right.provider_node_id))
+}
+
+fn validate_job_announcement(announcement: &JobAnnouncement) -> Result<()> {
+    let submitter_key =
+        verifying_key_from_base64(&announcement.submitter_ed25519_public_key_base64)
+            .context("failed to decode job submitter public key")?;
+    verify_job_announcement_signature(announcement, &submitter_key)
+        .context("job announcement signature invalid")
+}
+
+#[derive(Debug, Clone)]
 struct ValidatedFetchedEvidence {
     job_spec: JobSpec,
     execution_receipt: ExecutionReceipt,
@@ -1708,7 +1883,8 @@ fn update_wallet_commitment(state: &mut PersistedState) {
 mod tests {
     use super::*;
     use osciris_core::{
-        canonical_json_sha256, sign_execution_receipt, sign_receipt_availability, ArtifactManifest,
+        canonical_json_sha256, sign_execution_receipt, sign_job_claim, sign_provider_capability,
+        sign_receipt_availability, verify_job_assignment_signature, ArtifactManifest,
         ChainSubmissionStatus, ExecutionStatus, GpuMetadata, SHA256_ALGORITHM,
     };
 
@@ -1724,6 +1900,58 @@ mod tests {
             challenge_window_seconds: 3_600,
             budget_usdc_micros: 5_000_000,
         }
+    }
+
+    fn test_signing_key(byte: u8) -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[byte; 32])
+    }
+
+    fn signed_provider_capability(
+        provider_id: &str,
+        signing_key: &ed25519_dalek::SigningKey,
+        current_load: f64,
+        active_job_count: u32,
+    ) -> ProviderCapability {
+        let mut capability = ProviderCapability {
+            node_id: provider_id.to_string(),
+            ed25519_public_key_base64: verifying_key_to_base64(&signing_key.verifying_key()),
+            host_class: "test-gpu-host".to_string(),
+            gpu_model: "NVIDIA A10G".to_string(),
+            gpu_count: 1,
+            vram_gb: 24.0,
+            cuda_available: true,
+            mps_available: false,
+            supported_job_types: vec![JobType::InferenceEconomics, JobType::LlmLoraEconomics],
+            supported_runtimes: vec!["python".to_string()],
+            pricing_hint: Some("test".to_string()),
+            current_load,
+            active_job_count,
+            status: NodeStatus::OnlineIdle,
+            updated_at: Utc::now().to_rfc3339(),
+            signature: String::new(),
+        };
+        capability.signature = sign_provider_capability(&capability, signing_key).unwrap();
+        capability
+    }
+
+    fn signed_job_claim(
+        provider_id: &str,
+        signing_key: &ed25519_dalek::SigningKey,
+        job_id: uuid::Uuid,
+        claimed_at: &str,
+    ) -> JobClaim {
+        let mut claim = JobClaim {
+            job_id,
+            provider_node_id: provider_id.to_string(),
+            provider_ed25519_public_key_base64: verifying_key_to_base64(
+                &signing_key.verifying_key(),
+            ),
+            claimed_at: claimed_at.to_string(),
+            claim_note: Some("test claim".to_string()),
+            signature: String::new(),
+        };
+        claim.signature = sign_job_claim(&claim, signing_key).unwrap();
+        claim
     }
 
     #[test]
@@ -1808,6 +2036,68 @@ mod tests {
 
         let workspace = service.workspace().await;
         assert_eq!(workspace.protocol_announcement_count, 1);
+    }
+
+    #[tokio::test]
+    async fn match_provider_records_lowest_load_assignment() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DaemonService::new(directory.path().to_path_buf()).unwrap();
+        let job = service.create_job(valid_job_input()).await.unwrap();
+        service.submit_job(&job.job_id).await.unwrap();
+        service.publish_job(&job.job_id).await.unwrap();
+
+        let store = ProtocolStore::open(&directory.path().join("protocol"))
+            .await
+            .unwrap();
+        let job_id = uuid::Uuid::parse_str(&job.job_id).unwrap();
+        let provider_a_key = test_signing_key(2);
+        let provider_b_key = test_signing_key(3);
+        let capability_a = signed_provider_capability("provider-a", &provider_a_key, 0.70, 0);
+        let capability_b = signed_provider_capability("provider-b", &provider_b_key, 0.10, 2);
+        store
+            .record_provider_capability(&capability_a)
+            .await
+            .unwrap();
+        store
+            .record_provider_capability(&capability_b)
+            .await
+            .unwrap();
+        store
+            .record_job_claim(&signed_job_claim(
+                "provider-a",
+                &provider_a_key,
+                job_id,
+                "2026-07-01T00:00:01Z",
+            ))
+            .await
+            .unwrap();
+        store
+            .record_job_claim(&signed_job_claim(
+                "provider-b",
+                &provider_b_key,
+                job_id,
+                "2026-07-01T00:00:02Z",
+            ))
+            .await
+            .unwrap();
+
+        let refreshed = service.match_provider(&job.job_id).await.unwrap();
+        assert_eq!(refreshed.jobs[0].state, DesktopJobState::Running);
+        assert_eq!(
+            refreshed.jobs[0].provider_node_id,
+            Some("provider-b".to_string())
+        );
+        let assignment = store
+            .load_job_assignment(&job.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(assignment.assigned_provider_node_id, "provider-b");
+        verify_job_assignment_signature(
+            &assignment,
+            &service.inner.protocol_identity.verifying_key(),
+        )
+        .unwrap();
     }
 
     #[tokio::test]

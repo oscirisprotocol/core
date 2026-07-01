@@ -9,6 +9,7 @@ import {
   getWorkspace,
   ingestEvidence,
   launchDaemon,
+  matchProvider,
   prepareWithdrawal,
   publishJob,
   refreshProtocolJobs,
@@ -302,6 +303,12 @@ export default function App() {
                 void runAction(() => publishJob(jobId), async () => {
                   setSelectedJobId(jobId);
                   await refreshProtocol();
+                })
+              }
+              onMatchProvider={(jobId) =>
+                void runAction(() => matchProvider(jobId), (nextWorkspace) => {
+                  setWorkspace(nextWorkspace);
+                  setSelectedJobId(jobId);
                 })
               }
               onIngestEvidence={(jobId) => void ingestJobEvidence(jobId)}
