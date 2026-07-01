@@ -138,9 +138,16 @@ pub struct InferenceServeConfig {
     pub signing_key_seed_base64: String,
     pub provider_id: String,
     pub profile_id: String,
+    pub runtime: InferenceRuntimeConfig,
     pub listen_addr: String,
     pub bootstrap_peers: Vec<String>,
     pub run_for: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub enum InferenceRuntimeConfig {
+    Deterministic,
+    LlamaCppServer { endpoint: String },
 }
 
 #[derive(Debug, Clone)]
@@ -460,7 +467,7 @@ pub async fn serve_inference(config: &InferenceServeConfig) -> Result<InferenceS
                             ..
                         },
                     )) => {
-                        let response = build_inference_response(&request, config, &signing_key);
+                        let response = build_inference_response(&request, config, &signing_key).await;
                         match response {
                             Ok(response) => {
                                 request_ids.push(response.request_id);
@@ -573,11 +580,12 @@ pub async fn wait_for_inference_response(
     }
 }
 
-fn build_inference_response(
+async fn build_inference_response(
     request: &InferenceRequest,
     config: &InferenceServeConfig,
     signing_key: &ed25519_dalek::SigningKey,
 ) -> Result<InferenceResponse> {
+    let started = std::time::Instant::now();
     let requester_key = verifying_key_from_base64(&request.requester_ed25519_public_key_base64)?;
     verify_inference_request_signature(request, &requester_key)?;
     if request.profile_id != config.profile_id {
@@ -595,7 +603,12 @@ fn build_inference_response(
     if request.request_sha256 != expected_request_sha256 {
         bail!("inference request commitment mismatch");
     }
-    let response_text = deterministic_inference_response(request);
+    let response_text = match &config.runtime {
+        InferenceRuntimeConfig::Deterministic => deterministic_inference_response(request),
+        InferenceRuntimeConfig::LlamaCppServer { endpoint } => {
+            llama_cpp_completion(endpoint, request).await?
+        }
+    };
     let mut response = InferenceResponse {
         request_id: request.request_id,
         profile_id: request.profile_id.clone(),
@@ -606,7 +619,7 @@ fn build_inference_response(
         request_sha256: request.request_sha256.clone(),
         prompt_tokens: rough_token_count(&request.prompt),
         output_tokens: 0,
-        latency_ms: 0,
+        latency_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
         created_at: chrono::Utc::now().to_rfc3339(),
         signature: String::new(),
     };
@@ -628,6 +641,40 @@ fn deterministic_inference_response(request: &InferenceRequest) -> String {
         request.prompt.chars().count(),
         bounded
     )
+}
+
+async fn llama_cpp_completion(endpoint: &str, request: &InferenceRequest) -> Result<String> {
+    let endpoint = endpoint.trim_end_matches('/');
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{endpoint}/completion"))
+        .json(&serde_json::json!({
+            "prompt": request.prompt,
+            "n_predict": request.max_output_tokens,
+            "stream": false
+        }))
+        .send()
+        .await
+        .with_context(|| format!("send inference request to llama.cpp endpoint {endpoint}"))?
+        .error_for_status()
+        .with_context(|| format!("llama.cpp endpoint {endpoint} returned an error"))?;
+    let value: serde_json::Value = response
+        .json()
+        .await
+        .context("decode llama.cpp completion response")?;
+    value
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            value
+                .get("choices")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|choices| choices.first())
+                .and_then(|choice| choice.get("text"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("llama.cpp response did not contain completion content"))
 }
 
 fn rough_token_count(text: &str) -> u32 {
@@ -2606,8 +2653,8 @@ mod tests {
         verifying_key_to_base64(&signing_key.verifying_key())
     }
 
-    #[test]
-    fn inference_request_response_signatures_verify() {
+    #[tokio::test]
+    async fn inference_request_response_signatures_verify() {
         let requester_seed = BASE64.encode([21_u8; 32]);
         let provider_seed = BASE64.encode([22_u8; 32]);
         let request = create_inference_request(&InferenceSubmitConfig {
@@ -2626,12 +2673,14 @@ mod tests {
                 signing_key_seed_base64: provider_seed,
                 provider_id: "provider-1".to_string(),
                 profile_id: "osciris-test-profile".to_string(),
+                runtime: InferenceRuntimeConfig::Deterministic,
                 listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
                 bootstrap_peers: vec![],
                 run_for: Duration::from_secs(1),
             },
             &provider_key,
         )
+        .await
         .unwrap();
         assert_eq!(response.request_id, request.request_id);
         assert_eq!(response.request_sha256, request.request_sha256);

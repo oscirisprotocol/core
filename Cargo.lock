@@ -4168,6 +4168,7 @@ dependencies = [
  "futures",
  "libp2p",
  "osciris-core",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "shell-words",

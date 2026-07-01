@@ -57,6 +57,13 @@ expose that path through daemon/Desktop.
 - First provider runtime is deterministic test inference. It proves peer
   transport, request verification, response signing, and result commitments.
   Pinned Qwen/llama.cpp model supervision is still pending.
+- Added provider runtime adapter selection for `inference serve`:
+  - `--runtime deterministic` for transport tests
+  - `--runtime llama-cpp --llama-cpp-endpoint <url>` for a provider-local
+    llama.cpp-compatible server such as `llama-server`
+- The llama.cpp adapter forwards prompts to `/completion` on an already-running
+  provider-local server and signs the returned content. Full profile
+  installation/download and process supervision remains pending.
 - Verification passed:
   - `cargo test -p osciris-node inference_request_response_signatures_verify --locked -- --nocapture`
   - `cargo test -p osciris-core inference_request_and_response_signatures_round_trip --locked -- --nocapture`

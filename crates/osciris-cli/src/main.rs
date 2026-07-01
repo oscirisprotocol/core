@@ -34,8 +34,8 @@ use osciris_node::network::{
     auto_fetch_receipts, create_inference_request, fetch_receipt_bundle_p2p,
     job_matches_provider_capability, peer_id_from_signing_seed, run_auto_provider, serve_inference,
     serve_presence, wait_for_inference_response, AutoProviderConfig, AutoVerifierConfig,
-    BundleFetchConfig, InferenceServeConfig, InferenceSubmitConfig, InferenceWaitConfig,
-    NetworkServeConfig,
+    BundleFetchConfig, InferenceRuntimeConfig, InferenceServeConfig, InferenceSubmitConfig,
+    InferenceWaitConfig, NetworkServeConfig,
 };
 use osciris_node::status::{
     build_provider_network_status, calculate_quorum_status, calculate_settlement_status,
@@ -735,6 +735,10 @@ enum InferenceCommands {
         provider_id: String,
         #[arg(long)]
         profile_id: String,
+        #[arg(long, default_value = "deterministic")]
+        runtime: String,
+        #[arg(long)]
+        llama_cpp_endpoint: Option<String>,
         #[arg(long, default_value = "/ip4/127.0.0.1/tcp/0")]
         listen_addr: String,
         #[arg(long = "bootstrap-peer")]
@@ -2229,6 +2233,8 @@ fn main() -> Result<()> {
                 signing_key_seed_file,
                 provider_id,
                 profile_id,
+                runtime: inference_runtime,
+                llama_cpp_endpoint,
                 listen_addr,
                 bootstrap_peers,
                 run_seconds,
@@ -2240,6 +2246,7 @@ fn main() -> Result<()> {
                     signing_key_seed_base64,
                     provider_id,
                     profile_id,
+                    runtime: parse_inference_runtime(&inference_runtime, llama_cpp_endpoint)?,
                     listen_addr,
                     bootstrap_peers,
                     run_for: Duration::from_secs(run_seconds),
@@ -3335,6 +3342,26 @@ fn load_signing_seed_from_source(
         ),
     };
     Ok(seed.trim().to_string())
+}
+
+fn parse_inference_runtime(
+    runtime: &str,
+    llama_cpp_endpoint: Option<String>,
+) -> Result<InferenceRuntimeConfig> {
+    match runtime {
+        "deterministic" => Ok(InferenceRuntimeConfig::Deterministic),
+        "llama-cpp" | "llama_cpp" => {
+            let endpoint = llama_cpp_endpoint
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow!("--llama-cpp-endpoint is required for --runtime llama-cpp")
+                })?;
+            Ok(InferenceRuntimeConfig::LlamaCppServer { endpoint })
+        }
+        other => {
+            bail!("unsupported inference runtime {other:?}; expected deterministic or llama-cpp")
+        }
+    }
 }
 
 fn default_command_for_job_type(job_type: &JobType, command: &str) -> String {
