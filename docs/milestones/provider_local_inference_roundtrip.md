@@ -101,7 +101,7 @@ Local proof already covers:
 - requester-side evidence materialization; and
 - successful local `osciris-verifier` review of interactive evidence.
 
-## What works in v0.1.1
+## What works in the current beta
 
 The current CLI already provides:
 
