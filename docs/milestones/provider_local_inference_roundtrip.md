@@ -75,7 +75,33 @@ published to GitHub, the public status bundle, or Horizen. Public records contai
 request/result commitments, provider identity, model/profile commitment,
 timings, verifier decisions, and anchor transaction references.
 
-## What works in v0.1.1
+## What works after PR #16
+
+The PR #16 implementation adds the interactive transport surface:
+
+- `osciris-node inference serve`
+- `osciris-node inference submit`
+- `osciris-node inference wait`
+- daemon/Desktop network start/stop controls
+- Desktop `Test inference` prompt submission and signed response display
+
+Interactive inference now returns a signed provider response and a
+verifier-ready evidence bundle. The provider writes `job_spec.json`,
+`inference_request.json`, `inference_response.json`, `execution_receipt.json`,
+`receipt_bundle.json`, `bundle_index.json`, and
+`python-output/inference_economics.json` under `.osciris/evidence/<request-id>`.
+The requester unpacks and validates the provider bundle locally and records the
+execution receipt and bundle hashes.
+
+Local proof already covers:
+
+- signed request/response verification;
+- deterministic runtime response signing;
+- `llama-cpp` `/completion` adapter response signing;
+- requester-side evidence materialization; and
+- successful local `osciris-verifier` review of interactive evidence.
+
+## What works in the current beta
 
 The current CLI already provides:
 
@@ -88,45 +114,71 @@ The current CLI already provides:
 - participant snapshots and milestone publication;
 - hash and receipt anchoring through the Horizen integration path.
 
-These primitives prove asynchronous accountable jobs. They do not yet provide
+These primitives prove asynchronous accountable jobs. They do not provide
 interactive prompt/result transport or a local model-server supervisor.
 
 ## Commands introduced by this milestone
 
-The following command surface is the implementation target and is **not
-available in v0.1.1**:
+PR #16 implements the base interactive command surface. The readiness command
+exists now, and pinned-profile install plus managed local runtime startup are
+partially implemented.
 
 ```bash
-# Provider: install and verify the pinned profile.
+# Install and verify the pinned profile from a locally staged GGUF artifact.
 osciris-node inference profile install \
-  --profile osciris-qwen3-4b-q4-v1
+  --work-root ~/.osciris \
+  --profile osciris-qwen3-4b-q4-v1 \
+  --source-model-path /models/Qwen3-4B-Q4_K_M.gguf
 
-# Provider: expose the local runtime only through the OSCIRIS peer.
+# Provider: expose an already-running deterministic or llama.cpp-compatible runtime.
 osciris-node inference serve \
   --work-root /var/lib/osciris \
-  --profile osciris-qwen3-4b-q4-v1 \
-  --backend auto \
-  --slots 1 \
+  --provider-id provider-1 \
+  --profile-id osciris-qwen3-4b-q4-v1 \
+  --runtime llama-cpp \
+  --llama-cpp-endpoint http://127.0.0.1:8080 \
+  --listen-addr /ip4/0.0.0.0/tcp/4101 \
+  --bootstrap-peer <bootstrap-multiaddr>
+
+# Provider: alternatively let OSCIRIS launch a managed local llama-server.
+osciris-node inference serve \
+  --work-root /var/lib/osciris \
+  --provider-id provider-1 \
+  --profile-id osciris-qwen3-4b-q4-v1 \
+  --runtime llama-cpp-managed \
+  --llama-server-path /usr/local/bin/llama-server \
+  --model-path /var/lib/osciris/.osciris/profiles/osciris-qwen3-4b-q4-v1/Qwen3-4B-Q4_K_M.gguf \
+  --managed-llama-host 127.0.0.1 \
+  --managed-llama-port 8080 \
+  --managed-llama-ctx-size 8192 \
+  --listen-addr /ip4/0.0.0.0/tcp/4101 \
   --bootstrap-peer <bootstrap-multiaddr>
 
 # Developer: submit a bounded request.
 osciris-node inference submit \
   --work-root ~/.osciris \
-  --profile osciris-qwen3-4b-q4-v1 \
+  --signing-key-seed-base64 <developer-seed> \
+  --requester-id developer-1 \
+  --profile-id osciris-qwen3-4b-q4-v1 \
   --prompt-file ./prompt.txt \
   --max-output-tokens 512 \
-  --required-verifier-count 2 \
-  --output ./request.json
+  --provider-peer-id <provider-peer-id> \
+  --bootstrap-peer <provider-multiaddr> \
+  --output ./response.json
 
 # Developer: wait for the signed result and reviewed receipt status.
 osciris-node inference wait \
   --work-root ~/.osciris \
-  --request-file ./request.json \
-  --response-output ./response.json \
+  --signing-key-seed-base64 <developer-seed> \
+  --request-json ./request.json \
+  --provider-peer-id <provider-peer-id> \
+  --bootstrap-peer <provider-multiaddr> \
+  --output ./response.json \
   --timeout-seconds 180
 
-# Any participant: inspect capacity and verification gaps.
+# Inspect capacity and verification gaps.
 osciris-node inference readiness \
+  --work-root ~/.osciris \
   --profile osciris-qwen3-4b-q4-v1
 ```
 
@@ -204,6 +256,88 @@ returned JSON must include:
 - signed execution receipt;
 - two accepted verifier receipt references;
 - quorum state and optional Horizen testnet anchor.
+
+## Current multi-host acceptance commands
+
+The exact remote run should use public or synthetic prompt content only.
+
+On the provider host, either start a local llama.cpp-compatible server first:
+
+```bash
+llama-server \
+  --model /models/Qwen3-4B-Q4_K_M.gguf \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --ctx-size 8192
+```
+
+Then expose that provider over OSCIRIS peer transport:
+
+```bash
+osciris-node inference serve \
+  --work-root /var/lib/osciris-provider \
+  --signing-key-seed-base64 <provider-seed> \
+  --provider-id provider-1 \
+  --profile-id osciris-qwen3-4b-q4-v1 \
+  --runtime llama-cpp \
+  --llama-cpp-endpoint http://127.0.0.1:8080 \
+  --listen-addr /ip4/0.0.0.0/tcp/4101 \
+  --run-seconds 600
+```
+
+Or use the managed runtime path after installing the pinned artifact:
+
+```bash
+osciris-node inference profile install \
+  --work-root /var/lib/osciris-provider \
+  --profile osciris-qwen3-4b-q4-v1 \
+  --source-model-path /models/Qwen3-4B-Q4_K_M.gguf
+
+osciris-node inference serve \
+  --work-root /var/lib/osciris-provider \
+  --signing-key-seed-base64 <provider-seed> \
+  --provider-id provider-1 \
+  --profile-id osciris-qwen3-4b-q4-v1 \
+  --runtime llama-cpp-managed \
+  --llama-server-path /usr/local/bin/llama-server \
+  --model-path /var/lib/osciris-provider/.osciris/profiles/osciris-qwen3-4b-q4-v1/Qwen3-4B-Q4_K_M.gguf \
+  --managed-llama-host 127.0.0.1 \
+  --managed-llama-port 8080 \
+  --managed-llama-ctx-size 8192 \
+  --listen-addr /ip4/0.0.0.0/tcp/4101 \
+  --run-seconds 600
+```
+
+On the developer host, submit the prompt to the provider peer:
+
+```bash
+osciris-node inference submit \
+  --work-root ~/.osciris-dev \
+  --signing-key-seed-base64 <developer-seed> \
+  --requester-id developer-1 \
+  --profile-id osciris-qwen3-4b-q4-v1 \
+  --prompt-file ./prompt.txt \
+  --max-output-tokens 512 \
+  --provider-peer-id <provider-peer-id> \
+  --bootstrap-peer /ip4/<provider-ip>/tcp/4101/p2p/<provider-peer-id> \
+  --timeout-seconds 180 \
+  --output ./response.json
+```
+
+The response JSON includes `evidence_dir`, `execution_receipt_sha256`, and
+`bundle_sha256`. Each verifier can review the materialized bundle:
+
+```bash
+osciris-node verify \
+  --evidence-dir <evidence_dir_from_response> \
+  --provider-public-key-base64 <provider-ed25519-public-key-base64> \
+  --verifier-id verifier-1 \
+  --signing-key-id verifier-1-key \
+  --signing-key-seed-base64 <verifier-1-seed>
+```
+
+Run the same command with `verifier-2`. Acceptance requires the updated
+`receipt_bundle.json` to include two accepted verification receipt hashes.
 
 ## Acceptance criteria
 

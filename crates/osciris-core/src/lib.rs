@@ -133,6 +133,35 @@ pub struct NodeIdentity {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InferenceRequest {
+    pub request_id: Uuid,
+    pub profile_id: String,
+    pub prompt: String,
+    pub max_output_tokens: u32,
+    pub requester_node_id: String,
+    pub requester_ed25519_public_key_base64: String,
+    pub created_at: String,
+    pub request_sha256: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InferenceResponse {
+    pub request_id: Uuid,
+    pub profile_id: String,
+    pub provider_node_id: String,
+    pub provider_ed25519_public_key_base64: String,
+    pub response_text: String,
+    pub request_sha256: String,
+    pub response_sha256: String,
+    pub prompt_tokens: u32,
+    pub output_tokens: u32,
+    pub latency_ms: u64,
+    pub created_at: String,
+    pub signature: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PeerPresence {
     pub node_id: String,
@@ -409,6 +438,18 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+pub fn inference_request_commitment(
+    profile_id: &str,
+    prompt: &str,
+    max_output_tokens: u32,
+) -> String {
+    sha256_bytes(format!("{profile_id}\0{max_output_tokens}\0{prompt}").as_bytes())
+}
+
+pub fn inference_response_commitment(request_sha256: &str, response_text: &str) -> String {
+    sha256_bytes(format!("{request_sha256}\0{response_text}").as_bytes())
+}
+
 pub fn sha256_file(path: &Path) -> Result<String, CoreError> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
@@ -486,6 +527,56 @@ pub fn verify_verification_receipt_signature(
     let signature =
         Signature::from_slice(&signature).map_err(|_| CoreError::SignatureVerification)?;
     let mut unsigned = receipt.clone();
+    unsigned.signature.clear();
+    let bytes = canonical_json_bytes(&unsigned)?;
+    verifying_key
+        .verify(&bytes, &signature)
+        .map_err(|_| CoreError::SignatureVerification)
+}
+
+pub fn sign_inference_request(
+    request: &InferenceRequest,
+    signing_key: &SigningKey,
+) -> Result<String, CoreError> {
+    let mut unsigned = request.clone();
+    unsigned.signature.clear();
+    let bytes = canonical_json_bytes(&unsigned)?;
+    Ok(BASE64.encode(signing_key.sign(&bytes).to_bytes()))
+}
+
+pub fn verify_inference_request_signature(
+    request: &InferenceRequest,
+    verifying_key: &VerifyingKey,
+) -> Result<(), CoreError> {
+    let signature = BASE64.decode(&request.signature)?;
+    let signature =
+        Signature::from_slice(&signature).map_err(|_| CoreError::SignatureVerification)?;
+    let mut unsigned = request.clone();
+    unsigned.signature.clear();
+    let bytes = canonical_json_bytes(&unsigned)?;
+    verifying_key
+        .verify(&bytes, &signature)
+        .map_err(|_| CoreError::SignatureVerification)
+}
+
+pub fn sign_inference_response(
+    response: &InferenceResponse,
+    signing_key: &SigningKey,
+) -> Result<String, CoreError> {
+    let mut unsigned = response.clone();
+    unsigned.signature.clear();
+    let bytes = canonical_json_bytes(&unsigned)?;
+    Ok(BASE64.encode(signing_key.sign(&bytes).to_bytes()))
+}
+
+pub fn verify_inference_response_signature(
+    response: &InferenceResponse,
+    verifying_key: &VerifyingKey,
+) -> Result<(), CoreError> {
+    let signature = BASE64.decode(&response.signature)?;
+    let signature =
+        Signature::from_slice(&signature).map_err(|_| CoreError::SignatureVerification)?;
+    let mut unsigned = response.clone();
     unsigned.signature.clear();
     let bytes = canonical_json_bytes(&unsigned)?;
     verifying_key
@@ -822,6 +913,44 @@ mod tests {
 
         receipt.signature = sign_verification_receipt(&receipt, &signing_key).unwrap();
         verify_verification_receipt_signature(&receipt, &verifying_key).unwrap();
+    }
+
+    #[test]
+    fn inference_request_and_response_signatures_round_trip() {
+        let requester_key = SigningKey::from_bytes(&[18_u8; 32]);
+        let requester_verifying_key = requester_key.verifying_key();
+        let provider_key = SigningKey::from_bytes(&[19_u8; 32]);
+        let provider_verifying_key = provider_key.verifying_key();
+        let mut request = InferenceRequest {
+            request_id: Uuid::now_v7(),
+            profile_id: "osciris-qwen3-4b-q4-v1".to_string(),
+            prompt: "/no_think\nExplain this function.".to_string(),
+            max_output_tokens: 128,
+            requester_node_id: "developer-1".to_string(),
+            requester_ed25519_public_key_base64: verifying_key_to_base64(&requester_verifying_key),
+            created_at: "2026-07-01T00:00:00Z".to_string(),
+            request_sha256: "a".repeat(64),
+            signature: String::new(),
+        };
+        request.signature = sign_inference_request(&request, &requester_key).unwrap();
+        verify_inference_request_signature(&request, &requester_verifying_key).unwrap();
+
+        let mut response = InferenceResponse {
+            request_id: request.request_id,
+            profile_id: request.profile_id.clone(),
+            provider_node_id: "provider-1".to_string(),
+            provider_ed25519_public_key_base64: verifying_key_to_base64(&provider_verifying_key),
+            response_text: "This function returns a bounded explanation.".to_string(),
+            request_sha256: request.request_sha256.clone(),
+            response_sha256: "b".repeat(64),
+            prompt_tokens: 5,
+            output_tokens: 8,
+            latency_ms: 42,
+            created_at: "2026-07-01T00:00:01Z".to_string(),
+            signature: String::new(),
+        };
+        response.signature = sign_inference_response(&response, &provider_key).unwrap();
+        verify_inference_response_signature(&response, &provider_verifying_key).unwrap();
     }
 
     #[test]

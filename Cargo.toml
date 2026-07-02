@@ -3,6 +3,7 @@ members = [
   "crates/osciris-chain",
   "crates/osciris-cli",
   "crates/osciris-core",
+  "crates/osciris-daemon",
   "crates/osciris-node",
   "crates/osciris-verifier",
 ]
@@ -10,14 +11,16 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-version = "0.1.1"
+version = "0.1.2"
 license = "Apache-2.0"
 authors = ["OSCIRIS Labs"]
 
 [workspace.dependencies]
 alloy = { version = "2.0.5", default-features = true }
+alloy-primitives = "1.6.0"
 anyhow = "1.0"
 async-trait = "0.1"
+atomic-write-file = "0.3"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 clap = { version = "4.5", features = ["derive"] }
@@ -34,10 +37,12 @@ serde_json = "1.0"
 sha2 = "0.10"
 shell-words = "1.1"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
+subtle = "2.6"
 tar = "0.4"
 tempfile = "3.10"
 thiserror = "2.0"
-tokio = { version = "1.48", features = ["fs", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.48", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.18", features = ["serde", "v7"] }

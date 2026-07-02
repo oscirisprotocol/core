@@ -21,7 +21,8 @@ use osciris_core::{
     bundle_hash, load_signing_key_from_base64_seed, sha256_file, sign_challenge_record,
     sign_job_announcement, sign_job_assignment, sign_job_claim, sign_milestone_record,
     sign_provider_capability, sign_receipt_availability, verify_challenge_record_signature,
-    verify_job_claim_signature, verify_milestone_record_signature,
+    verify_job_announcement_signature, verify_job_claim_signature,
+    verify_milestone_record_signature, verify_provider_capability_signature,
     verify_receipt_availability_signature, verify_verification_receipt_signature,
     verifying_key_from_base64, verifying_key_to_base64, ChainSubmissionStatus, ChallengeReasonCode,
     ChallengeRecord, ChallengeStatus, ExecutionReceipt, JobAnnouncement, JobAssignment, JobClaim,
@@ -30,12 +31,16 @@ use osciris_core::{
     VerificationReceipt, VerificationReceiptAnnouncement,
 };
 use osciris_node::network::{
-    auto_fetch_receipts, fetch_receipt_bundle_p2p, peer_id_from_signing_seed, run_auto_provider,
-    serve_presence, AutoProviderConfig, AutoVerifierConfig, BundleFetchConfig, NetworkServeConfig,
+    auto_fetch_receipts, create_inference_request, fetch_receipt_bundle_p2p,
+    install_pinned_inference_profile, job_matches_provider_capability, peer_id_from_signing_seed,
+    pinned_inference_model_path, run_auto_provider, serve_inference, serve_presence,
+    wait_for_inference_response, AutoProviderConfig, AutoVerifierConfig, BundleFetchConfig,
+    InferenceRuntimeConfig, InferenceServeConfig, InferenceSubmitConfig, InferenceWaitConfig,
+    NetworkServeConfig,
 };
 use osciris_node::status::{
-    build_provider_network_status, calculate_quorum_status, calculate_settlement_status,
-    QuorumStatusReport, SettlementStatusReport,
+    build_inference_readiness_report, build_provider_network_status, calculate_quorum_status,
+    calculate_settlement_status, QuorumStatusReport, SettlementStatusReport,
 };
 use osciris_node::store::ProtocolStore;
 use osciris_node::{run_job, ProviderConfig};
@@ -159,6 +164,8 @@ enum Commands {
         signing_key_id: String,
         #[arg(long)]
         signing_key_seed_base64: String,
+        #[arg(long)]
+        announcement_output: Option<PathBuf>,
     },
     RegisterProvider {
         #[arg(long)]
@@ -239,6 +246,10 @@ enum Commands {
     Network {
         #[command(subcommand)]
         command: NetworkCommands,
+    },
+    Inference {
+        #[command(subcommand)]
+        command: InferenceCommands,
     },
 }
 
@@ -454,6 +465,20 @@ enum NetworkCommands {
         #[arg(long)]
         signing_key_seed_file: Option<PathBuf>,
         #[arg(long, default_value = "manual_assignment")]
+        assignment_reason: String,
+    },
+    AutoAssignJob {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        job_id: Uuid,
+        #[arg(long)]
+        assigner_id: String,
+        #[arg(long)]
+        signing_key_seed_base64: Option<String>,
+        #[arg(long)]
+        signing_key_seed_file: Option<PathBuf>,
+        #[arg(long, default_value = "auto_match")]
         assignment_reason: String,
     },
     Assignments {
@@ -697,6 +722,98 @@ enum NetworkCommands {
         presence_interval_seconds: u64,
         #[arg(long, default_value_t = 60)]
         run_seconds: u64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum InferenceCommands {
+    ProfileInstall {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        source_model_path: PathBuf,
+    },
+    Serve {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        signing_key_seed_base64: Option<String>,
+        #[arg(long)]
+        signing_key_seed_file: Option<PathBuf>,
+        #[arg(long)]
+        provider_id: String,
+        #[arg(long)]
+        profile_id: String,
+        #[arg(long, default_value = "deterministic")]
+        runtime: String,
+        #[arg(long)]
+        llama_cpp_endpoint: Option<String>,
+        #[arg(long)]
+        llama_server_path: Option<PathBuf>,
+        #[arg(long)]
+        model_path: Option<PathBuf>,
+        #[arg(long, default_value = "127.0.0.1")]
+        managed_llama_host: String,
+        #[arg(long, default_value_t = 8080)]
+        managed_llama_port: u16,
+        #[arg(long, default_value_t = 8192)]
+        managed_llama_ctx_size: u32,
+        #[arg(long, default_value = "/ip4/127.0.0.1/tcp/0")]
+        listen_addr: String,
+        #[arg(long = "bootstrap-peer")]
+        bootstrap_peers: Vec<String>,
+        #[arg(long, default_value_t = 30)]
+        run_seconds: u64,
+    },
+    Submit {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        signing_key_seed_base64: String,
+        #[arg(long)]
+        requester_id: String,
+        #[arg(long)]
+        profile_id: String,
+        #[arg(long)]
+        prompt_file: PathBuf,
+        #[arg(long, default_value_t = 256)]
+        max_output_tokens: u32,
+        #[arg(long)]
+        provider_peer_id: String,
+        #[arg(long, default_value = "/ip4/127.0.0.1/tcp/0")]
+        listen_addr: String,
+        #[arg(long = "bootstrap-peer")]
+        bootstrap_peers: Vec<String>,
+        #[arg(long, default_value_t = 180)]
+        timeout_seconds: u64,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    Wait {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        signing_key_seed_base64: String,
+        #[arg(long)]
+        request_json: PathBuf,
+        #[arg(long)]
+        provider_peer_id: String,
+        #[arg(long, default_value = "/ip4/127.0.0.1/tcp/0")]
+        listen_addr: String,
+        #[arg(long = "bootstrap-peer")]
+        bootstrap_peers: Vec<String>,
+        #[arg(long, default_value_t = 180)]
+        timeout_seconds: u64,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    Readiness {
+        #[arg(long)]
+        work_root: PathBuf,
+        #[arg(long)]
+        profile: String,
     },
 }
 
@@ -1021,11 +1138,12 @@ fn main() -> Result<()> {
             verifier_id,
             signing_key_id,
             signing_key_seed_base64,
+            announcement_output,
         } => {
             let verifier = VerifierConfig {
-                verifier_id,
+                verifier_id: verifier_id.clone(),
                 signing_key_id,
-                signing_key_seed_base64,
+                signing_key_seed_base64: signing_key_seed_base64.clone(),
             };
             let output = if let Some(chain_config) = chain_config {
                 let chain = OscirisChain::new(ChainConfig::from_path(&chain_config)?)?;
@@ -1041,6 +1159,19 @@ fn main() -> Result<()> {
                     &verifier,
                 ))?
             };
+            if let Some(announcement_output) = announcement_output {
+                let announcement = build_verification_receipt_announcement(
+                    &output.verification_receipt_path,
+                    &verifier_id,
+                    &signing_key_seed_base64,
+                )?;
+                if let Some(parent) = announcement_output.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("failed to create {}", parent.display()))?;
+                }
+                fs::write(&announcement_output, serde_json::to_vec_pretty(&announcement)?)
+                    .with_context(|| format!("failed to write {}", announcement_output.display()))?;
+            }
             println!("{}", output.verification_receipt_path.display());
         }
         Commands::RegisterProvider {
@@ -1519,6 +1650,28 @@ fn main() -> Result<()> {
                 runtime.block_on(store.record_job_assignment(&assignment))?;
                 print_json(&assignment)?;
             }
+            NetworkCommands::AutoAssignJob {
+                work_root,
+                job_id,
+                assigner_id,
+                signing_key_seed_base64,
+                signing_key_seed_file,
+                assignment_reason,
+            } => {
+                let store = runtime.block_on(ProtocolStore::open(&work_root.join(".osciris")))?;
+                let signing_key = load_signing_key_from_seed_source(
+                    signing_key_seed_base64,
+                    signing_key_seed_file,
+                )?;
+                let assignment = runtime.block_on(auto_assign_job(
+                    &store,
+                    job_id,
+                    &assigner_id,
+                    &signing_key,
+                    &assignment_reason,
+                ))?;
+                print_json(&assignment)?;
+            }
             NetworkCommands::Assignments { work_root } => {
                 let store = runtime.block_on(ProtocolStore::open(&work_root.join(".osciris")))?;
                 let assignments = runtime.block_on(store.list_job_assignments())?;
@@ -1901,15 +2054,20 @@ fn main() -> Result<()> {
                     .join("evidence")
                     .join(job_id.to_string());
                 copy_dir_recursive_replace(&source_dir, &evidence_dir)?;
-                let bundle = validate_fetched_evidence(&evidence_dir, &availability)?;
-                runtime.block_on(store.record_receipt_bundle(&bundle))?;
+                let ingestion = runtime.block_on(ingest_fetched_evidence(
+                    &store,
+                    &evidence_dir,
+                    &availability,
+                ))?;
                 print_json(&serde_json::json!({
                     "job_id": job_id,
                     "provider_id": provider_id,
                     "source_dir": source_dir,
                     "evidence_dir": evidence_dir,
                     "execution_receipt_sha256": availability.execution_receipt_sha256,
-                    "bundle_sha256": availability.bundle_sha256
+                    "bundle_sha256": availability.bundle_sha256,
+                    "execution_receipt_path": ingestion.execution_receipt_path,
+                    "receipt_bundle_path": ingestion.receipt_bundle_path
                 }))?;
             }
             NetworkCommands::FetchReceiptBundleP2p {
@@ -1986,9 +2144,12 @@ fn main() -> Result<()> {
                 if !evidence_dir.exists() {
                     let source_dir = local_path_from_bundle_uri(&availability.bundle_uri)?;
                     copy_dir_recursive_replace(&source_dir, &evidence_dir)?;
-                    let bundle = validate_fetched_evidence(&evidence_dir, &availability)?;
-                    runtime.block_on(store.record_receipt_bundle(&bundle))?;
                 }
+                let ingestion = runtime.block_on(ingest_fetched_evidence(
+                    &store,
+                    &evidence_dir,
+                    &availability,
+                ))?;
                 let verifier = VerifierConfig {
                     verifier_id,
                     signing_key_id,
@@ -2003,6 +2164,8 @@ fn main() -> Result<()> {
                     "job_id": job_id,
                     "provider_id": provider_id,
                     "evidence_dir": evidence_dir,
+                    "ingested_execution_receipt_path": ingestion.execution_receipt_path,
+                    "ingested_receipt_bundle_path": ingestion.receipt_bundle_path,
                     "verification_receipt_path": output.verification_receipt_path,
                     "receipt_bundle_path": output.receipt_bundle_path
                 }))?;
@@ -2102,6 +2265,150 @@ fn main() -> Result<()> {
                     run_for: Duration::from_secs(run_seconds),
                 }))?;
                 print_json(&summary)?;
+            }
+        },
+        Commands::Inference { command } => match command {
+            InferenceCommands::ProfileInstall {
+                work_root,
+                profile,
+                source_model_path,
+            } => {
+                if profile != "osciris-qwen3-4b-q4-v1" {
+                    bail!("unsupported pinned inference profile {profile:?}");
+                }
+                let summary = install_pinned_inference_profile(
+                    &work_root.join(".osciris"),
+                    &source_model_path,
+                )?;
+                print_json(&summary)?;
+            }
+            InferenceCommands::Serve {
+                work_root,
+                signing_key_seed_base64,
+                signing_key_seed_file,
+                provider_id,
+                profile_id,
+                runtime: inference_runtime,
+                llama_cpp_endpoint,
+                llama_server_path,
+                model_path,
+                managed_llama_host,
+                managed_llama_port,
+                managed_llama_ctx_size,
+                listen_addr,
+                bootstrap_peers,
+                run_seconds,
+            } => {
+                let signing_key_seed_base64 =
+                    load_signing_seed_from_source(signing_key_seed_base64, signing_key_seed_file)?;
+                let summary = runtime.block_on(serve_inference(&InferenceServeConfig {
+                    protocol_root: work_root.join(".osciris"),
+                    signing_key_seed_base64,
+                    signing_key_id: None,
+                    provider_id,
+                    profile_id,
+                    runtime: parse_inference_runtime(
+                        &inference_runtime,
+                        llama_cpp_endpoint,
+                        llama_server_path,
+                        model_path.or_else(|| {
+                            (inference_runtime == "llama-cpp-managed"
+                                || inference_runtime == "llama_cpp_managed")
+                                .then(|| pinned_inference_model_path(&work_root.join(".osciris")))
+                        }),
+                        managed_llama_host,
+                        managed_llama_port,
+                        managed_llama_ctx_size,
+                    )?,
+                    listen_addr,
+                    bootstrap_peers,
+                    run_for: Duration::from_secs(run_seconds),
+                }))?;
+                print_json(&summary)?;
+            }
+            InferenceCommands::Submit {
+                work_root,
+                signing_key_seed_base64,
+                requester_id,
+                profile_id,
+                prompt_file,
+                max_output_tokens,
+                provider_peer_id,
+                listen_addr,
+                bootstrap_peers,
+                timeout_seconds,
+                output,
+            } => {
+                let prompt = fs::read_to_string(&prompt_file)
+                    .with_context(|| format!("failed to read {}", prompt_file.display()))?;
+                fs::create_dir_all(work_root.join(".osciris").join("inference"))?;
+                let request = create_inference_request(&InferenceSubmitConfig {
+                    signing_key_seed_base64: signing_key_seed_base64.clone(),
+                    requester_id,
+                    profile_id,
+                    prompt,
+                    max_output_tokens,
+                })?;
+                let summary =
+                    runtime.block_on(wait_for_inference_response(&InferenceWaitConfig {
+                        protocol_root: work_root.join(".osciris"),
+                        signing_key_seed_base64,
+                        request: request.clone(),
+                        provider_peer_id,
+                        listen_addr,
+                        bootstrap_peers,
+                        timeout: Duration::from_secs(timeout_seconds),
+                    }))?;
+                if let Some(output) = output {
+                    fs::write(&output, serde_json::to_vec_pretty(&summary)?)?;
+                }
+                print_json(&summary)?;
+            }
+            InferenceCommands::Wait {
+                work_root,
+                signing_key_seed_base64,
+                request_json,
+                provider_peer_id,
+                listen_addr,
+                bootstrap_peers,
+                timeout_seconds,
+                output,
+            } => {
+                fs::create_dir_all(work_root.join(".osciris").join("inference"))?;
+                let request: osciris_core::InferenceRequest = serde_json::from_slice(
+                    &fs::read(&request_json)
+                        .with_context(|| format!("failed to read {}", request_json.display()))?,
+                )?;
+                let summary =
+                    runtime.block_on(wait_for_inference_response(&InferenceWaitConfig {
+                        protocol_root: work_root.join(".osciris"),
+                        signing_key_seed_base64,
+                        request,
+                        provider_peer_id,
+                        listen_addr,
+                        bootstrap_peers,
+                        timeout: Duration::from_secs(timeout_seconds),
+                    }))?;
+                if let Some(output) = output {
+                    fs::write(&output, serde_json::to_vec_pretty(&summary)?)?;
+                }
+                print_json(&summary)?;
+            }
+            InferenceCommands::Readiness { work_root, profile } => {
+                let store = runtime.block_on(ProtocolStore::open(&work_root.join(".osciris")))?;
+                let peer_presences = runtime.block_on(store.list_peer_presences())?;
+                let stored_capabilities = runtime.block_on(store.list_provider_capabilities())?;
+                let mut capabilities = Vec::with_capacity(stored_capabilities.len());
+                for capability in stored_capabilities {
+                    if let Some(full) =
+                        runtime.block_on(store.load_provider_capability(&capability.node_id))?
+                    {
+                        capabilities.push(full);
+                    }
+                }
+                let report =
+                    build_inference_readiness_report(&profile, &peer_presences, &capabilities);
+                print_json(&report)?;
             }
         },
     }
@@ -3128,6 +3435,44 @@ fn load_signing_seed_from_source(
     Ok(seed.trim().to_string())
 }
 
+fn parse_inference_runtime(
+    runtime: &str,
+    llama_cpp_endpoint: Option<String>,
+    llama_server_path: Option<PathBuf>,
+    model_path: Option<PathBuf>,
+    managed_llama_host: String,
+    managed_llama_port: u16,
+    managed_llama_ctx_size: u32,
+) -> Result<InferenceRuntimeConfig> {
+    match runtime {
+        "deterministic" => Ok(InferenceRuntimeConfig::Deterministic),
+        "llama-cpp" | "llama_cpp" => {
+            let endpoint = llama_cpp_endpoint
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow!("--llama-cpp-endpoint is required for --runtime llama-cpp")
+                })?;
+            Ok(InferenceRuntimeConfig::LlamaCppServer { endpoint })
+        }
+        "llama-cpp-managed" | "llama_cpp_managed" => {
+            let llama_server_path = llama_server_path
+                .ok_or_else(|| anyhow!("--llama-server-path is required for --runtime llama-cpp-managed"))?;
+            let model_path = model_path
+                .ok_or_else(|| anyhow!("--model-path is required for --runtime llama-cpp-managed"))?;
+            Ok(InferenceRuntimeConfig::ManagedLlamaCpp {
+                llama_server_path,
+                model_path,
+                host: managed_llama_host,
+                port: managed_llama_port,
+                ctx_size: managed_llama_ctx_size,
+            })
+        }
+        other => {
+            bail!("unsupported inference runtime {other:?}; expected deterministic, llama-cpp, or llama-cpp-managed")
+        }
+    }
+}
+
 fn default_command_for_job_type(job_type: &JobType, command: &str) -> String {
     if command != "uv run osciris llm-lora-economics" {
         return command.to_string();
@@ -3316,6 +3661,129 @@ fn create_signed_provider_capability(
     Ok(capability)
 }
 
+#[derive(Debug, Clone)]
+struct ProviderMatchCandidate {
+    provider_node_id: String,
+    current_load: f64,
+    active_job_count: u32,
+    claimed_at: String,
+}
+
+async fn auto_assign_job(
+    store: &ProtocolStore,
+    job_id: Uuid,
+    assigner_id: &str,
+    signing_key: &ed25519_dalek::SigningKey,
+    assignment_reason: &str,
+) -> Result<JobAssignment> {
+    let announcement = store
+        .load_job_announcement(&job_id.to_string())
+        .await?
+        .with_context(|| format!("cannot auto-assign unknown job {job_id}"))?;
+    validate_job_announcement(&announcement)?;
+    if let Some(existing) = store.load_job_assignment(&job_id.to_string()).await? {
+        return Ok(existing);
+    }
+
+    let claims = store.load_job_claims_by_job(&job_id.to_string()).await?;
+    let selected = select_provider_match(&announcement, &claims, store).await?;
+    let mut assignment = JobAssignment {
+        job_id,
+        assigned_provider_node_id: selected.provider_node_id,
+        assigner_node_id: assigner_id.to_string(),
+        assigner_ed25519_public_key_base64: verifying_key_to_base64(&signing_key.verifying_key()),
+        assignment_reason: assignment_reason.to_string(),
+        assigned_at: Utc::now().to_rfc3339(),
+        signature: String::new(),
+    };
+    assignment.signature = sign_job_assignment(&assignment, signing_key)?;
+    store.record_job_assignment(&assignment).await?;
+    Ok(assignment)
+}
+
+async fn select_provider_match(
+    announcement: &JobAnnouncement,
+    claims: &[JobClaim],
+    store: &ProtocolStore,
+) -> Result<ProviderMatchCandidate> {
+    let mut candidates = Vec::new();
+    for claim in claims {
+        if claim.job_id != announcement.job_id {
+            continue;
+        }
+        let Some(capability) = store
+            .load_provider_capability(&claim.provider_node_id)
+            .await?
+        else {
+            continue;
+        };
+        if let Some(candidate) =
+            validate_provider_match_candidate(announcement, claim, &capability)?
+        {
+            candidates.push(candidate);
+        }
+    }
+    candidates.sort_by(compare_provider_match_candidates);
+    candidates.into_iter().next().with_context(|| {
+        format!(
+            "no valid provider claims matched job {} and capability {}",
+            announcement.job_id, announcement.required_capability
+        )
+    })
+}
+
+fn validate_provider_match_candidate(
+    announcement: &JobAnnouncement,
+    claim: &JobClaim,
+    capability: &ProviderCapability,
+) -> Result<Option<ProviderMatchCandidate>> {
+    if capability.node_id != claim.provider_node_id {
+        return Ok(None);
+    }
+    if capability.ed25519_public_key_base64 != claim.provider_ed25519_public_key_base64 {
+        return Ok(None);
+    }
+    let provider_key = verifying_key_from_base64(&claim.provider_ed25519_public_key_base64)
+        .context("failed to decode provider claim public key")?;
+    verify_job_claim_signature(claim, &provider_key).context("provider claim signature invalid")?;
+    verify_provider_capability_signature(capability, &provider_key)
+        .context("provider capability signature invalid")?;
+    if !matches!(
+        capability.status,
+        NodeStatus::OnlineIdle | NodeStatus::OnlineBusy
+    ) {
+        return Ok(None);
+    }
+    if !job_matches_provider_capability(announcement, capability) {
+        return Ok(None);
+    }
+    Ok(Some(ProviderMatchCandidate {
+        provider_node_id: claim.provider_node_id.clone(),
+        current_load: capability.current_load,
+        active_job_count: capability.active_job_count,
+        claimed_at: claim.claimed_at.clone(),
+    }))
+}
+
+fn compare_provider_match_candidates(
+    left: &ProviderMatchCandidate,
+    right: &ProviderMatchCandidate,
+) -> std::cmp::Ordering {
+    left.current_load
+        .total_cmp(&right.current_load)
+        .then_with(|| left.active_job_count.cmp(&right.active_job_count))
+        .then_with(|| left.claimed_at.cmp(&right.claimed_at))
+        .then_with(|| left.provider_node_id.cmp(&right.provider_node_id))
+}
+
+fn validate_job_announcement(announcement: &JobAnnouncement) -> Result<()> {
+    let submitter_key =
+        verifying_key_from_base64(&announcement.submitter_ed25519_public_key_base64)
+            .context("failed to decode job submitter public key")?;
+    verify_job_announcement_signature(announcement, &submitter_key)
+        .context("job announcement signature invalid")
+}
+
 fn signed_job_claim(
     provider_id: &str,
     public_key: &str,
@@ -3470,16 +3938,82 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct IngestedEvidence {
+    execution_receipt_path: PathBuf,
+    receipt_bundle_path: PathBuf,
+    execution_receipt_sha256: String,
+    bundle_sha256: String,
+}
+
+async fn ingest_fetched_evidence(
+    store: &ProtocolStore,
+    evidence_dir: &Path,
+    availability: &ReceiptAvailability,
+) -> Result<IngestedEvidence> {
+    let validated = validate_fetched_evidence(evidence_dir, availability)?;
+    store
+        .upsert_job_spec(
+            &validated.job_spec,
+            &json_enum_label(&validated.execution_receipt.status)?,
+            Some(evidence_dir),
+            Some(&validated.execution_receipt.metrics_path),
+        )
+        .await?;
+    store
+        .record_execution_receipt(
+            &validated.execution_receipt,
+            evidence_dir,
+            &validated.execution_receipt.metrics_path,
+        )
+        .await?;
+    store.record_receipt_bundle(&validated.bundle).await?;
+    Ok(IngestedEvidence {
+        execution_receipt_path: validated.execution_receipt_path,
+        receipt_bundle_path: validated.receipt_bundle_path,
+        execution_receipt_sha256: availability.execution_receipt_sha256.clone(),
+        bundle_sha256: availability.bundle_sha256.clone(),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct ValidatedFetchedEvidence {
+    job_spec: JobSpec,
+    execution_receipt: ExecutionReceipt,
+    bundle: ReceiptBundle,
+    execution_receipt_path: PathBuf,
+    receipt_bundle_path: PathBuf,
+}
+
 fn validate_fetched_evidence(
     evidence_dir: &Path,
     availability: &ReceiptAvailability,
-) -> Result<ReceiptBundle> {
+) -> Result<ValidatedFetchedEvidence> {
+    let job_spec_path = evidence_dir.join("job_spec.json");
     let execution_receipt_path = evidence_dir.join("execution_receipt.json");
     let receipt_bundle_path = evidence_dir.join("receipt_bundle.json");
+    let job_spec: JobSpec = serde_json::from_slice(
+        &fs::read(&job_spec_path)
+            .with_context(|| format!("failed to read {}", job_spec_path.display()))?,
+    )?;
     let execution_receipt: ExecutionReceipt = serde_json::from_slice(
         &fs::read(&execution_receipt_path)
             .with_context(|| format!("failed to read {}", execution_receipt_path.display()))?,
     )?;
+    if job_spec.job_id != availability.job_id {
+        bail!(
+            "job spec job_id {} does not match availability job_id {}",
+            job_spec.job_id,
+            availability.job_id
+        );
+    }
+    if job_spec.job_id != execution_receipt.job_id {
+        bail!(
+            "job spec job_id {} does not match execution receipt job_id {}",
+            job_spec.job_id,
+            execution_receipt.job_id
+        );
+    }
     if execution_receipt.job_id != availability.job_id {
         bail!(
             "fetched execution receipt job_id {} does not match availability job_id {}",
@@ -3502,6 +4036,9 @@ fn validate_fetched_evidence(
             availability.execution_receipt_sha256
         );
     }
+    let provider_key = verifying_key_from_base64(&availability.provider_ed25519_public_key_base64)?;
+    osciris_core::verify_execution_receipt_signature(&execution_receipt, &provider_key)
+        .context("fetched execution receipt signature invalid")?;
     let bundle: ReceiptBundle = serde_json::from_slice(
         &fs::read(&receipt_bundle_path)
             .with_context(|| format!("failed to read {}", receipt_bundle_path.display()))?,
@@ -3535,7 +4072,13 @@ fn validate_fetched_evidence(
             availability.bundle_sha256
         );
     }
-    Ok(bundle)
+    Ok(ValidatedFetchedEvidence {
+        job_spec,
+        execution_receipt,
+        bundle,
+        execution_receipt_path,
+        receipt_bundle_path,
+    })
 }
 
 fn load_verification_receipts(evidence_dir: &Path) -> Result<Vec<VerificationReceipt>> {
@@ -3552,6 +4095,13 @@ fn load_verification_receipts(evidence_dir: &Path) -> Result<Vec<VerificationRec
     }
     receipts.sort_by(|left, right| left.verifier_id.cmp(&right.verifier_id));
     Ok(receipts)
+}
+
+fn json_enum_label<T: Serialize>(value: &T) -> Result<String> {
+    Ok(serde_json::to_value(value)?
+        .as_str()
+        .unwrap_or_default()
+        .to_string())
 }
 
 async fn record_verified_verification_receipt_announcement(
@@ -3572,6 +4122,30 @@ async fn record_verified_verification_receipt_announcement(
         .record_verification_receipt(&announcement.verification_receipt)
         .await?;
     Ok(announcement.verification_receipt.clone())
+}
+
+fn build_verification_receipt_announcement(
+    verification_receipt_path: &Path,
+    verifier_id: &str,
+    signing_key_seed_base64: &str,
+) -> Result<VerificationReceiptAnnouncement> {
+    let receipt: VerificationReceipt = serde_json::from_slice(
+        &fs::read(verification_receipt_path)
+            .with_context(|| format!("failed to read {}", verification_receipt_path.display()))?,
+    )?;
+    if receipt.verifier_id != verifier_id {
+        bail!(
+            "verification receipt verifier_id {} does not match requested verifier_id {}",
+            receipt.verifier_id,
+            verifier_id
+        );
+    }
+    let signing_key = load_signing_key_from_base64_seed(signing_key_seed_base64)?;
+    Ok(VerificationReceiptAnnouncement {
+        verifier_node_id: verifier_id.to_string(),
+        verifier_ed25519_public_key_base64: verifying_key_to_base64(&signing_key.verifying_key()),
+        verification_receipt: receipt,
+    })
 }
 
 fn resolve_provider_address(
@@ -3625,8 +4199,9 @@ fn parse_node_role(raw: &str) -> Result<NodeRole> {
 mod tests {
     use super::*;
     use osciris_core::{
-        sign_verification_receipt, verify_provider_capability_signature, ExecutionStatus,
-        GpuMetadata, VerificationChecks, VerificationReceipt, VerificationStatus,
+        sign_verification_receipt, verify_job_assignment_signature,
+        verify_provider_capability_signature, ExecutionStatus, GpuMetadata, VerificationChecks,
+        VerificationReceipt, VerificationStatus,
     };
 
     fn temp_work_root(name: &str) -> PathBuf {
@@ -3660,6 +4235,57 @@ mod tests {
             signature: "signature".to_string(),
             signing_key_id: "provider-key".to_string(),
         }
+    }
+
+    fn test_signing_key(byte: u8) -> ed25519_dalek::SigningKey {
+        let seed = BASE64.encode([byte; 32]);
+        load_signing_key_from_base64_seed(&seed).unwrap()
+    }
+
+    fn signed_test_announcement(
+        job_id: Uuid,
+        signing_key: &ed25519_dalek::SigningKey,
+    ) -> JobAnnouncement {
+        let job = mock_demo_job(job_id);
+        let mut announcement = JobAnnouncement {
+            job_id,
+            job_spec: job.clone(),
+            submitter_node_id: "enterprise-1".to_string(),
+            submitter_ed25519_public_key_base64: verifying_key_to_base64(
+                &signing_key.verifying_key(),
+            ),
+            job_type: job.job_type.clone(),
+            privacy_mode: job.privacy_policy.privacy_mode.clone(),
+            required_capability: "gpu>=24gb".to_string(),
+            estimated_runtime_class: "short".to_string(),
+            payment_token: job.payment_token.clone(),
+            escrow_amount_atomic: job.escrow_amount_atomic.clone(),
+            required_verifier_count: job.required_verifier_count,
+            announced_at: "2026-06-04T00:00:00Z".to_string(),
+            signature: String::new(),
+        };
+        announcement.signature = sign_job_announcement(&announcement, signing_key).unwrap();
+        announcement
+    }
+
+    fn signed_test_capability(
+        provider_id: &str,
+        signing_key: &ed25519_dalek::SigningKey,
+        current_load: f64,
+        active_job_count: u32,
+    ) -> ProviderCapability {
+        let mut capability = signed_provider_capability(
+            provider_id,
+            &verifying_key_to_base64(&signing_key.verifying_key()),
+            signing_key,
+            "aws_g5_xlarge",
+        )
+        .unwrap();
+        capability.current_load = current_load;
+        capability.active_job_count = active_job_count;
+        capability.signature.clear();
+        capability.signature = sign_provider_capability(&capability, signing_key).unwrap();
+        capability
     }
 
     fn verification_receipt(verifier_id: &str) -> VerificationReceipt {
@@ -3806,6 +4432,108 @@ mod tests {
     }
 
     #[test]
+    fn build_verification_announcement_from_receipt_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let seed = "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=";
+        let signing_key = load_signing_key_from_base64_seed(seed).unwrap();
+        let verifier_id = "verifier-a";
+        let mut receipt = verification_receipt(verifier_id);
+        receipt.signature = sign_verification_receipt(&receipt, &signing_key).unwrap();
+        let path = directory.path().join("verification_receipt.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+        let announcement =
+            build_verification_receipt_announcement(&path, verifier_id, seed).unwrap();
+        assert_eq!(announcement.verifier_node_id, verifier_id);
+        assert_eq!(
+            announcement.verifier_ed25519_public_key_base64,
+            verifying_key_to_base64(&signing_key.verifying_key())
+        );
+        assert_eq!(announcement.verification_receipt, receipt);
+    }
+
+    #[test]
+    fn build_verification_announcement_rejects_verifier_mismatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let seed = "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=";
+        let signing_key = load_signing_key_from_base64_seed(seed).unwrap();
+        let mut receipt = verification_receipt("verifier-a");
+        receipt.signature = sign_verification_receipt(&receipt, &signing_key).unwrap();
+        let path = directory.path().join("verification_receipt.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+        let error =
+            build_verification_receipt_announcement(&path, "verifier-b", seed).unwrap_err();
+        assert!(error.to_string().contains("does not match requested verifier_id"));
+    }
+
+    #[test]
+    fn ingested_fetched_evidence_records_execution_receipt_and_bundle() {
+        if !inspect_command("python3", &["--version"]).available {
+            return;
+        }
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let provider_work_root = temp_work_root("osciris-ingest-provider");
+        let consumer_work_root = temp_work_root("osciris-ingest-consumer");
+        let provider_key = test_signing_key(9);
+        let provider_public = verifying_key_to_base64(&provider_key.verifying_key());
+        let job = mock_demo_job(Uuid::now_v7());
+        let provider = ProviderConfig {
+            provider_id: "provider-a".to_string(),
+            signing_key_id: "provider-a-key".to_string(),
+            signing_key_seed_base64: BASE64.encode([9_u8; 32]),
+            repo_root: std::env::current_dir().unwrap(),
+            work_root: provider_work_root.clone(),
+        };
+        let output = runtime.block_on(run_job(&job, &provider)).unwrap();
+        let mut availability = ReceiptAvailability {
+            job_id: job.job_id,
+            provider_node_id: provider.provider_id.clone(),
+            provider_ed25519_public_key_base64: provider_public,
+            execution_receipt_sha256: sha256_file(&output.execution_receipt_path).unwrap(),
+            bundle_sha256: {
+                let bundle: ReceiptBundle =
+                    serde_json::from_slice(&fs::read(&output.receipt_bundle_path).unwrap())
+                        .unwrap();
+                bundle.bundle_sha256
+            },
+            bundle_uri: format!("file://{}", output.evidence_dir.display()),
+            announced_at: "2026-06-04T00:00:00Z".to_string(),
+            signature: String::new(),
+        };
+        availability.signature = sign_receipt_availability(&availability, &provider_key).unwrap();
+
+        let consumer_store = runtime
+            .block_on(ProtocolStore::open(&consumer_work_root.join(".osciris")))
+            .unwrap();
+        let ingested = runtime
+            .block_on(ingest_fetched_evidence(
+                &consumer_store,
+                &output.evidence_dir,
+                &availability,
+            ))
+            .unwrap();
+        assert_eq!(ingested.bundle_sha256, availability.bundle_sha256);
+
+        let jobs = runtime.block_on(consumer_store.list_jobs()).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].job_id, job.job_id.to_string());
+        assert_eq!(jobs[0].status, "completed");
+        assert_eq!(
+            runtime
+                .block_on(consumer_store.load_receipt_bundle(&job.job_id.to_string()))
+                .unwrap()
+                .unwrap()
+                .bundle_sha256,
+            availability.bundle_sha256
+        );
+
+        std::fs::remove_dir_all(provider_work_root).unwrap();
+        std::fs::remove_dir_all(consumer_work_root).unwrap();
+    }
+
+    #[test]
     fn doctor_reports_protocol_readiness() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let work_root = temp_work_root("osciris-doctor");
@@ -3873,6 +4601,104 @@ mod tests {
             verifying_key_to_base64(&signing_key.verifying_key())
         );
         verify_provider_capability_signature(&capability, &signing_key.verifying_key()).unwrap();
+    }
+
+    #[test]
+    fn auto_assign_job_selects_lowest_load_valid_claimant() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let work_root = temp_work_root("osciris-auto-assign");
+        let store = runtime
+            .block_on(ProtocolStore::open(&work_root.join(".osciris")))
+            .unwrap();
+
+        let enterprise_key = test_signing_key(1);
+        let provider_a_key = test_signing_key(2);
+        let provider_b_key = test_signing_key(3);
+        let assigner_key = test_signing_key(4);
+        let job_id = Uuid::now_v7();
+        let announcement = signed_test_announcement(job_id, &enterprise_key);
+        runtime
+            .block_on(store.record_job_announcement(&announcement))
+            .unwrap();
+
+        let capability_a = signed_test_capability("provider-a", &provider_a_key, 0.60, 0);
+        let capability_b = signed_test_capability("provider-b", &provider_b_key, 0.10, 2);
+        runtime
+            .block_on(store.record_provider_capability(&capability_a))
+            .unwrap();
+        runtime
+            .block_on(store.record_provider_capability(&capability_b))
+            .unwrap();
+
+        let provider_a_public = verifying_key_to_base64(&provider_a_key.verifying_key());
+        let provider_b_public = verifying_key_to_base64(&provider_b_key.verifying_key());
+        let claim_a =
+            signed_job_claim("provider-a", &provider_a_public, &provider_a_key, job_id).unwrap();
+        let claim_b =
+            signed_job_claim("provider-b", &provider_b_public, &provider_b_key, job_id).unwrap();
+        runtime.block_on(store.record_job_claim(&claim_a)).unwrap();
+        runtime.block_on(store.record_job_claim(&claim_b)).unwrap();
+
+        let assignment = runtime
+            .block_on(auto_assign_job(
+                &store,
+                job_id,
+                "enterprise-1",
+                &assigner_key,
+                "auto_match",
+            ))
+            .unwrap();
+        assert_eq!(assignment.assigned_provider_node_id, "provider-b");
+        verify_job_assignment_signature(&assignment, &assigner_key.verifying_key()).unwrap();
+
+        let stored = runtime
+            .block_on(store.load_job_assignment(&job_id.to_string()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.assigned_provider_node_id, "provider-b");
+        std::fs::remove_dir_all(work_root).unwrap();
+    }
+
+    #[test]
+    fn auto_assign_job_rejects_tampered_claim_signature() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let work_root = temp_work_root("osciris-auto-assign-tampered");
+        let store = runtime
+            .block_on(ProtocolStore::open(&work_root.join(".osciris")))
+            .unwrap();
+
+        let enterprise_key = test_signing_key(5);
+        let provider_key = test_signing_key(6);
+        let assigner_key = test_signing_key(7);
+        let job_id = Uuid::now_v7();
+        let announcement = signed_test_announcement(job_id, &enterprise_key);
+        runtime
+            .block_on(store.record_job_announcement(&announcement))
+            .unwrap();
+        let capability = signed_test_capability("provider-a", &provider_key, 0.0, 0);
+        runtime
+            .block_on(store.record_provider_capability(&capability))
+            .unwrap();
+
+        let provider_public = verifying_key_to_base64(&provider_key.verifying_key());
+        let mut claim =
+            signed_job_claim("provider-a", &provider_public, &provider_key, job_id).unwrap();
+        claim.claim_note = Some("tampered-after-signing".to_string());
+        runtime.block_on(store.record_job_claim(&claim)).unwrap();
+
+        let error = runtime
+            .block_on(auto_assign_job(
+                &store,
+                job_id,
+                "enterprise-1",
+                &assigner_key,
+                "auto_match",
+            ))
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("provider claim signature invalid"));
+        std::fs::remove_dir_all(work_root).unwrap();
     }
 
     #[test]

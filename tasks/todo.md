@@ -1,5 +1,1019 @@
 # Task Plan
 
+## Signed Desktop Self-Updates
+
+### Objective
+
+Allow installed OSCIRIS Node desktop clients to check for a newer GitHub
+Release, download a signed update, verify it locally, install it with explicit
+operator approval, and relaunch. Never publish updater metadata before every
+referenced platform asset and signature exists.
+
+### Security Boundary
+
+- Updates are accepted only when their Tauri signature verifies against the
+  public key compiled into the application.
+- The updater signing private key never enters the repository or release
+  artifacts; GitHub Actions receives it only through repository secrets.
+- Update checks may run asynchronously, but installation remains an explicit
+  operator action.
+- Normal branch/PR builds continue without signing credentials.
+- Tagged release publication fails closed when updater signing credentials are
+  absent or any expected update artifact is missing.
+
+### Checklist
+
+- [x] Add Tauri updater/process plugins and least-privilege capabilities
+- [x] Add desktop update state, check, progress, install, and relaunch UI
+- [x] Add signed updater artifact generation for tagged releases
+- [x] Generate `latest.json` only after all platform artifacts are present
+- [x] Document signing-key provisioning and rotation boundary
+- [x] Verify frontend, Rust, package, and workflow behavior
+
+### Review
+
+- Added background update checks plus a manual Local Node control. New versions
+  are presented to the operator; download/install is never silent.
+- Added Tauri updater and process plugins with only updater commands and process
+  restart exposed to the main window.
+- Generated an OSCIRIS updater keypair, stored it as the GitHub
+  `TAURI_SIGNING_PRIVATE_KEY` repository secret, preserved a mode-`600` offline
+  copy outside the repository, and embedded the matching public key.
+- Tagged releases now build signed updater bundles for macOS arm64, Linux x64,
+  and Windows x64. Branch and PR builds remain unsigned.
+- Added fail-closed staging and static-manifest scripts. Publication requires
+  one bundle/signature per platform and a tag matching the compiled Tauri
+  version.
+- Signed `v0.x` releases are GitHub latest releases so the static
+  `/releases/latest/download/latest.json` endpoint resolves.
+- Verification passed:
+  - `cargo test --locked` (84 passed, 1 network test ignored)
+  - desktop `cargo clippy --locked --all-targets -- -D warnings`
+  - `pnpm build`
+  - `pnpm audit --prod` (no known vulnerabilities)
+  - unsigned `pnpm tauri build` emitted `.app` and `.dmg`
+  - signed local updater build emitted `.app.tar.gz` and `.sig`
+  - updater staging and `latest.json` fixture tests
+  - release workflow YAML parse
+  - 860x620 responsive preview with no horizontal overflow
+
+## Interactive Remote Inference Transport
+
+### Objective
+
+Implement the missing prompt-to-another-machine path: a developer submits a
+prompt, a remote provider peer receives it over OSCIRIS peer transport, produces
+a signed response, and the developer can wait for/display the response. Then
+expose that path through daemon/Desktop.
+
+### Spec
+
+- Add backend inference request/result protocol types with:
+  - request ID
+  - profile ID
+  - prompt text
+  - max output tokens
+  - requester public key
+  - provider ID/public key
+  - request/result commitments
+  - provider signature
+- Add a libp2p request-response protocol separate from receipt-bundle transfer.
+- Add CLI commands:
+  - `osciris-node inference serve`
+  - `osciris-node inference submit`
+  - `osciris-node inference wait`
+- First vertical slice may use a deterministic provider runtime adapter to
+  prove remote transport and signing; model-server supervision is a follow-up
+  in the same objective, not considered complete until implemented.
+- Add daemon/Desktop network controls and prompt submission/result display once
+  backend commands exist.
+- Keep prompts/results off public gossipsub/status records.
+
+### Checklist
+
+- [x] Add core inference request/result data structures and signatures
+- [x] Add libp2p inference request-response protocol
+- [x] Add CLI `inference serve/submit/wait`
+- [x] Add pinned-profile install plus provider-managed llama.cpp startup
+- [x] Add daemon/Desktop network join/start controls
+- [x] Add desktop prompt submission and response display
+- [x] Verify local and multi-process transport tests
+
+### Review
+
+- Added signed `InferenceRequest` and `InferenceResponse` core protocol types,
+  plus request/result commitment helpers and signature verification.
+- Added `/osciris/inference/0.1.0` libp2p request-response protocol alongside
+  existing receipt-bundle transfer.
+- Added backend functions to create signed requests, serve inference requests,
+  and wait for signed responses from a provider peer.
+- Added CLI command surface:
+  - `osciris-node inference serve`
+  - `osciris-node inference submit`
+  - `osciris-node inference wait`
+- First provider runtime is deterministic test inference. It proves peer
+  transport, request verification, response signing, and result commitments.
+  Pinned Qwen/llama.cpp model supervision is still pending.
+- Added provider runtime adapter selection for `inference serve`:
+  - `--runtime deterministic` for transport tests
+  - `--runtime llama-cpp --llama-cpp-endpoint <url>` for a provider-local
+    llama.cpp-compatible server such as `llama-server`
+- The llama.cpp adapter forwards prompts to `/completion` on an already-running
+  provider-local server and signs the returned content. Full profile
+  installation/download and process supervision are now partially covered:
+  - `osciris-node inference profile install` verifies the pinned Qwen GGUF
+    SHA-256 before copying it under `.osciris/profiles/...`
+  - `osciris-node inference serve --runtime llama-cpp-managed` can launch a
+    provider-local `llama-server` process against that installed artifact
+  - remote artifact download/bootstrap is still not implemented
+- Interactive inference now writes verifier-ready evidence on both sides of the
+  transport:
+  - provider `inference serve` materializes `job_spec.json`,
+    `inference_request.json`, `inference_response.json`,
+    `execution_receipt.json`, `receipt_bundle.json`, `bundle_index.json`, and
+    `python-output/inference_economics.json` under `.osciris/evidence/<request-id>`
+  - requester `inference submit/wait` now stores and validates the returned
+    signed evidence bundle locally using the existing receipt-bundle path
+  - the interactive transport also ships a signed provider capability record so
+    `osciris-verifier` can validate the stored evidence without out-of-band
+    capability seeding
+- Verification passed:
+  - `cargo test -p osciris-node pinned_profile_install_rejects_hash_mismatch --locked -- --nocapture`
+  - `cargo test -p osciris-node managed_llama_runtime_uses_local_endpoint --locked -- --nocapture`
+  - `cargo test -p osciris-node inference_request_response_signatures_verify --locked -- --nocapture`
+  - `cargo test -p osciris-node inference_llama_cpp_runtime_signs_endpoint_response --locked -- --nocapture`
+  - `cargo test -p osciris-node inference_submit_round_trip_stores_verifier_ready_evidence --locked -- --nocapture`
+  - `cargo test -p osciris-node interactive_inference_evidence_verifies_locally --locked -- --nocapture`
+  - `cargo test -p osciris-core inference_request_and_response_signatures_round_trip --locked -- --nocapture`
+  - local two-process loopback CLI round trip from `inference submit` to
+    `inference serve`
+  - local two-process loopback CLI round trip through the `llama-cpp` runtime
+    adapter against a `/completion`-compatible endpoint
+  - `cargo fmt --check`
+  - `cargo test -p osciris-core --locked`
+  - `cargo test -p osciris-node --locked`
+  - `cargo check -p osciris-cli --locked`
+
+## Desktop Remote Prompt Test Inference
+
+### Objective
+
+Make it possible for a developer to send a prompt from the desktop app to a
+remote provider machine and receive a signed inference response back through
+OSCIRIS peer transport.
+
+### Current Boundary
+
+- Desktop now supports asynchronous protocol jobs: publish, match, import
+  provider evidence, import verifier receipts, and complete on quorum.
+- Backend CLI supports multi-host off-chain participation with `network serve`,
+  `network run-provider`, `network run-verifier`, provider claims,
+  assignments, execution receipts, receipt fetching, and quorum.
+- Interactive prompt/result transport is now implemented in the branch through
+  `osciris-node inference serve/submit/wait` and the desktop `Test inference`
+  view.
+- Therefore: the remaining gap is a verified remote multi-host provider plus
+  verifier quorum path, not the existence of direct prompt transport itself.
+
+### Spec
+
+- Add daemon/Desktop network join configuration:
+  - local enterprise/bootstrap identity
+  - listen address
+  - bootstrap peers
+  - provider/verifier discovery status
+- Add daemon command to start/stop `network serve` equivalent from desktop.
+- Add daemon command to submit an interactive inference request once backend
+  `inference submit/wait/serve` transport exists.
+- Add provider profile/capability matching for the pinned inference profile,
+  not just generic `gpu>=Ngb`.
+- Add response transport and local display:
+  - prompt commitment
+  - selected provider
+  - response text
+  - result commitment
+  - receipt/quorum status
+- Keep prompt/result private to peer transport; public state exposes only
+  hashes, receipts, and sanitized metadata.
+
+### Checklist
+
+- [x] Confirm current backend/desktop boundary
+- [x] Implement interactive inference peer transport commands
+- [x] Expose network join/serve status through daemon/Desktop
+- [x] Expose readiness gap summary through CLI/daemon status
+- [x] Add desktop prompt submission and response UI
+- [ ] Verify multi-host prompt round trip with at least one remote provider
+      and verifier quorum
+
+### Review
+
+- In progress: backend interactive peer transport now exists through signed
+  inference request/response types, libp2p request-response, and CLI
+  `inference serve/submit/wait`.
+- Added daemon/Tauri/TypeScript bridge so the desktop can submit a private
+  prompt to a provider peer and display the signed response.
+- Added desktop `Test inference` view with requester/profile/provider peer,
+  bootstrap multiaddr, token/timeout, and prompt inputs.
+- The response panel displays provider output plus request ID, provider ID,
+  profile, request hash, response hash, token counts, and latency.
+- Added daemon validation coverage for invalid desktop inference inputs.
+- Added daemon-managed desktop network start/stop controls around the existing
+  `serve_presence` peer network primitive.
+- Node view now accepts listen/bootstrap multiaddrs, starts/stops protocol
+  presence serving, and reports online/degraded/not-configured state.
+- Network start creates the daemon protocol identity in the protocol store when
+  missing, using the daemon protocol signing key.
+- Added `osciris-node inference readiness --work-root ... --profile ...` to
+  report the current provider/slot/verifier gap from the protocol store.
+- Daemon `status` now returns a real readiness snapshot instead of always
+  `null` when provider capability or peer-presence state exists locally.
+- Added a provider-side managed inference runtime path:
+  - operator can install the pinned Qwen GGUF artifact locally with hash
+    verification
+  - `inference serve` can launch `llama-server` directly instead of requiring a
+    separately supervised endpoint
+- Full CLI verification now passes after adding the missing `tempfile`
+  dependency to `osciris-cli` and refreshing `Cargo.lock`.
+- Still pending: a verified real multi-host prompt round trip with a remote
+  provider/verifier quorum.
+- PR/release gate remains open:
+  - PR #16 is still draft by design because the multi-host acceptance boundary
+    is not yet satisfied.
+  - Release workflow and installer assets are ready, but a new tagged release
+    should wait until remote-provider evidence and the accountable-verification
+    claim are either implemented or explicitly narrowed.
+- Verification passed:
+  - `cargo fmt --check`
+  - `cargo test -p osciris-node inference_readiness_counts_healthy_providers_slots_and_verifiers --locked -- --nocapture`
+  - `cargo test -p osciris-daemon status_reports_readiness_when_protocol_state_exists --locked -- --nocapture`
+  - `cargo check -p osciris-node -p osciris-daemon -p osciris-cli --locked`
+  - `cargo test -p osciris-daemon network_start_records_identity_and_stop_resets_status --locked -- --nocapture`
+  - `cargo test -p osciris-daemon submit_inference_rejects_invalid_desktop_inputs --locked -- --nocapture`
+  - `cargo test --locked -p osciris-daemon`
+  - `cargo test --locked -p osciris-daemon -p osciris-node -p osciris-cli`
+  - `cargo clippy -p osciris-daemon --locked --all-targets -- -D warnings`
+  - `pnpm --dir apps/desktop build`
+
+## Public Desktop Release Readiness Review
+
+### Objective
+
+Determine whether the latest OSCIRIS desktop branch state is ready to be
+released publicly through GitHub as a coherent desktop beta, not just as a
+passing PR branch.
+
+### Checklist
+
+- [x] Review committed branch state and CI history
+- [x] Verify current local desktop/frontend build state
+- [x] Verify current local native desktop package build
+- [x] Verify current node/daemon test state
+- [x] Check live GitHub release and updater endpoints
+- [x] Check live OSCIRIS Labs beta manifest against the repo verifier
+- [x] Identify publication and code blockers
+
+### Review
+
+- PR `#16` on `codex/desktop-node-foundation` is still draft, but GitHub shows
+  `mergeStateStatus=CLEAN` and the committed branch tip passed both Desktop and
+  Release workflow matrices.
+- The current worktree contains additional uncommitted desktop/inference
+  changes beyond `2e4ca50 Add signed desktop self-updates`. Those changes are
+  not fully release-ready yet.
+- Local verification on the current worktree passed:
+  - `pnpm --dir apps/desktop build`
+  - `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  - `pnpm --dir apps/desktop tauri build`
+  - `cargo test --locked -p osciris-node -p osciris-daemon`
+- The produced macOS bundle is structurally correct for the tested host:
+  - app bundle contains `Contents/MacOS/osciris-daemon`
+  - app bundle contains `Resources/LICENSE` and `Resources/NOTICE`
+  - local `.dmg` built successfully
+- Full Rust verification on the current worktree failed:
+  - resolved by adding `tempfile.workspace = true` to
+    `crates/osciris-cli/Cargo.toml`
+  - `cargo test --locked -p osciris-daemon -p osciris-node -p osciris-cli`
+    now passes
+- Live publication state is current on GitHub, while the live custom domain is
+  still routed externally:
+  - `https://github.com/oscirisprotocol/core/releases/latest/download/latest.json`
+    resolves to the published beta updater manifest
+  - `gh release view v0.1.2` shows the signed desktop installer/update assets
+    and the public release manifests
+  - `https://raw.githubusercontent.com/Khokavim/oscirislabs.com/main/public/beta-release-manifest.json`
+    points to `v0.1.2`
+  - `https://oscirislabs.com/` still serves the older Railway deployment, so
+    the custom domain is the remaining external routing blocker
+- Fixed the macOS desktop bundle signing path for local builds and release
+  notarization:
+  - `apps/desktop/src-tauri/tauri.conf.json` keeps
+    `bundle.macOS.signingIdentity = "-"` for ad-hoc local builds
+  - the release workflow now notarizes `v*` tags when Apple secrets are
+    present, but falls back to a sealed ad-hoc bundle when they are not
+  - that preserves local buildability without Apple credentials while keeping
+    GitHub release DMGs usable before Developer ID notarization is provisioned
+- Documentation is partially stale relative to the code:
+  - `docs/milestones/provider_local_inference_roundtrip.md` has been updated to
+    reflect interactive inference progress
+  - `docs/desktop_product_workspace.md` now matches the implemented desktop
+    prompt transport boundary
+
+### Release Blockers
+
+- External routing blocker: repoint `oscirislabs.com` so the live domain
+  serves the current GitHub-published beta surface instead of the stale
+  Railway deployment.
+- Documentation blocker: keep the desktop workflow docs aligned with the
+  implemented interactive inference surface and current beta boundary.
+  - `pnpm --dir apps/desktop prepare:sidecar:debug`
+  - `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
+
+## Desktop Installer Release Artifacts
+
+### Objective
+
+Publish usable desktop installer artifacts alongside the existing CLI release
+archives so testers can download macOS, Linux, and Windows desktop builds from
+GitHub Actions and tagged GitHub Releases.
+
+### Spec
+
+- Keep the existing CLI binary release artifacts intact.
+- Add release workflow packaging for the Tauri desktop app.
+- Upload platform installer artifacts from Release workflow runs:
+  - macOS `.dmg`
+  - Linux `.deb` and `.AppImage` where Tauri emits them
+  - Windows `.msi` and `.exe` where Tauri emits them
+- Include desktop installer artifacts in tag/workflow-dispatch GitHub releases.
+- Verify workflow YAML and at least one local platform bundle.
+
+### Checklist
+
+- [x] Inspect current published release and workflow artifact state
+- [x] Add desktop installer matrix to Release workflow
+- [x] Include installer globs in release publishing
+- [x] Verify workflow YAML parses
+- [x] Verify local macOS Tauri build emits a DMG
+
+### Review
+
+- Latest published release `v0.1.1` only included CLI archive assets, not
+  desktop installers.
+- Release workflow now has a `desktop-installers` matrix for macOS, Linux, and
+  Windows.
+- Branch and PR Release workflow runs will upload desktop installer artifacts
+  separately from CLI binaries.
+- Tag/workflow-dispatch releases will include desktop installer artifacts in
+  addition to existing CLI archives and manifest.
+- PR CI proved the release workflow can build:
+  - CLI archives for Linux, macOS arm64, and Windows x64
+  - desktop `.dmg`, `.deb`/`.AppImage`, and Windows installer artifacts
+  - updater manifest inputs for signed tag builds
+- Release publication is still unproven on the current branch because the
+  `Publish GitHub Release` job is skipped for non-tag PR runs by design.
+- Verified locally:
+  - `.github/workflows/release.yml` parses as YAML
+  - `pnpm --dir apps/desktop tauri build`
+  - local macOS bundle emitted
+    `apps/desktop/src-tauri/target/release/bundle/dmg/OSCIRIS Node_0.1.2_aarch64.dmg`
+
+## Desktop Execution and Verification Completion
+
+### Objective
+
+Make provider execution state and verifier completion observable/actionable from
+desktop after matching: users can see assigned/executing/evidence states and
+import signed verifier receipts so jobs reach completed only after quorum.
+
+### Spec
+
+- Keep provider execution non-custodial: desktop observes/imports evidence for
+  external providers instead of executing with provider keys it does not own.
+- Clarify job detail execution state for assigned provider, pending evidence,
+  imported provider receipt, and verifier quorum.
+- Add daemon command accepting a signed `VerificationReceiptAnnouncement` JSON
+  file.
+- Validate verifier identity and verification receipt signature before storing.
+- Refresh desktop protocol state so verifier count/quorum can mark completed.
+- Add desktop file picker action for importing verifier receipts.
+
+### Checklist
+
+- [x] Add daemon verification receipt import command
+- [x] Add regression coverage for accepted verifier quorum completion
+- [x] Add Tauri/TypeScript bindings and job-detail import action
+- [x] Improve job-detail execution/quorum status copy
+- [x] Verify daemon, frontend, and native Tauri checks
+- [x] Update review notes and push
+
+### Review
+
+- Kept provider execution non-custodial: desktop now makes assignment,
+  execution/evidence, and verifier-quorum state explicit without pretending to
+  execute jobs for external providers.
+- Added daemon `ImportVerificationReceipt` command accepting a signed
+  `VerificationReceiptAnnouncement` JSON file.
+- Daemon validates requested job ID, verifier ID consistency, verifier public
+  key, and verification receipt signature before storing.
+- Import refreshes desktop protocol state, allowing verifier count/quorum to
+  mark jobs completed.
+- Added Tauri/TypeScript bindings and a job-detail `Import verifier receipt`
+  file-picker action.
+- Job detail now distinguishes assigned provider/waiting evidence, provider
+  receipt imported, and verifier quorum status.
+- Added regression coverage proving one accepted verifier receipt completes a
+  one-verifier job.
+- Verification passed:
+  - `cargo test -p osciris-daemon import_verification_receipt_completes_job_after_quorum --locked -- --nocapture`
+  - `cargo fmt --check`
+  - `cargo test --locked -p osciris-daemon`
+  - `cargo clippy -p osciris-daemon --locked --all-targets -- -D warnings`
+  - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop prepare:sidecar:debug`
+  - `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  - `pnpm --dir apps/desktop tauri build`
+
+## Desktop Provider Matching
+
+### Objective
+
+Expose the backend automatic provider-assignment path through the daemon and
+desktop UI so a published desktop job can be matched without dropping to CLI.
+
+### Spec
+
+- Add a daemon command accepting a desktop `job_id`.
+- Load the daemon protocol store announcement and provider claims for that job.
+- Reuse the CLI trust checks: signed job announcement, signed claim, signed
+  provider capability, key consistency, online provider status, and capability
+  fit.
+- Deterministically select the best valid claimant by load, active jobs,
+  claim time, and provider ID.
+- Sign and persist the assignment with the daemon protocol identity.
+- Refresh desktop protocol state so the job shows assigned provider/running.
+- Add desktop job-detail action for queued/matching jobs.
+
+### Checklist
+
+- [x] Add daemon matching command and selector
+- [x] Add regression coverage with signed claims/capabilities
+- [x] Add Tauri/TypeScript bindings and job-detail action
+- [x] Verify daemon, frontend, and native Tauri checks
+- [x] Update review notes and push
+
+### Review
+
+- Added daemon `MatchProvider` command and client wrapper.
+- Matching loads the signed job announcement, existing provider claims, and
+  provider capabilities from the daemon protocol store.
+- Matching validates job announcement signature, claim signature, provider
+  capability signature, provider key consistency, online provider status, and
+  capability fit before assigning.
+- Candidate ranking matches the CLI path: lowest current load, lowest active
+  jobs, earliest claim timestamp, then provider ID.
+- Daemon signs and stores the assignment with its protocol identity, then
+  refreshes desktop protocol state.
+- Added Tauri/TypeScript bindings and a `Match provider` job-detail action for
+  queued/matching jobs.
+- Added regression coverage with signed claims/capabilities proving the
+  lowest-load valid provider is assigned and the assignment signature verifies.
+- Verification passed:
+  - `cargo test -p osciris-daemon match_provider_records_lowest_load_assignment --locked -- --nocapture`
+  - `cargo fmt --check`
+  - `cargo test --locked -p osciris-daemon`
+  - `cargo clippy -p osciris-daemon --locked --all-targets -- -D warnings`
+  - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop prepare:sidecar:debug`
+  - `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  - `pnpm --dir apps/desktop tauri build`
+
+## Desktop Evidence Ingestion UI
+
+### Objective
+
+Give desktop users a visible way to import a provider evidence directory for a
+published/running job, using the daemon evidence-ingestion API added in the
+previous slice.
+
+### Spec
+
+- Add a desktop job-detail action for jobs that are in or beyond network
+  execution states and not yet completed.
+- Use the native directory picker so users select the provider evidence folder
+  containing `job_spec.json`, `execution_receipt.json`, and
+  `receipt_bundle.json`.
+- Call `ingestEvidence({ job_id, evidence_dir })`.
+- Replace the workspace state from the daemon response and surface any error in
+  the existing error banner.
+- Keep this manual and explicit; automatic remote fetching remains backend/node
+  scope.
+
+### Checklist
+
+- [x] Add desktop directory picker dependency/imports
+- [x] Add job-detail ingestion action
+- [x] Verify TypeScript build and Tauri bridge
+- [x] Update review notes and push
+
+### Review
+
+- Added Tauri dialog plugin support for native directory selection.
+- Added `Import evidence` action to job detail for queued/matching/running/
+  verifying jobs.
+- The action opens a directory picker, calls daemon `ingestEvidence`, replaces
+  workspace state from the daemon response, and keeps errors in the existing
+  action banner.
+- Added explanatory lifecycle callout describing the required evidence files
+  and daemon-side verification.
+- Verification passed:
+  - `cargo fmt --check`
+  - `cargo test --locked -p osciris-daemon`
+  - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop prepare:sidecar:debug`
+  - `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  - `pnpm --dir apps/desktop tauri build`
+
+## Desktop Evidence Ingestion Bridge
+
+### Objective
+
+Expose provider evidence ingestion through the daemon so the desktop can import
+verified local evidence into the daemon-owned protocol store and refresh job
+status without shelling out to the CLI.
+
+### Spec
+
+- Add a daemon command accepting `job_id` and a local evidence directory.
+- Require an existing signed receipt availability record for that job/provider.
+- Validate `job_spec.json`, `execution_receipt.json`, and
+  `receipt_bundle.json` against the signed availability before mutating state.
+- Verify the provider execution receipt signature.
+- Record the job spec, execution receipt, and receipt bundle in the daemon
+  protocol store.
+- Refresh the desktop job state from protocol records after ingestion.
+
+### Checklist
+
+- [x] Implement daemon ingestion validation and storage
+- [x] Add daemon client/Tauri/TypeScript bindings
+- [x] Add regression coverage for evidence ingestion
+- [x] Run targeted daemon verification and desktop build checks
+- [x] Commit and push
+
+### Review
+
+- Added daemon `IngestEvidence` handling that opens the daemon-owned protocol
+  store, requires a signed receipt availability record, validates local
+  evidence files, records job spec/execution receipt/receipt bundle, and then
+  refreshes desktop protocol state.
+- Added daemon client, Tauri, and TypeScript wrappers for evidence ingestion.
+- Added regression coverage that writes deterministic signed provider evidence,
+  records signed availability, ingests evidence through the daemon, and
+  verifies the desktop job moves to `verifying` with receipt hashes populated.
+- Verification passed:
+  - `cargo test -p osciris-daemon ingest_evidence_records_receipt_and_refreshes_job --locked -- --nocapture`
+  - `cargo test -p osciris-daemon --locked`
+  - `cargo clippy -p osciris-daemon --locked --all-targets -- -D warnings`
+  - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop tauri build`
+- CI follow-up fixed the regression test to avoid depending on `uv` being
+  installed on GitHub desktop verify runners; the same workflow commands pass
+  locally:
+  - `cargo test --locked -p osciris-daemon`
+  - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop prepare:sidecar:debug`
+  - `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
+
+## Desktop Protocol Status Sync
+
+### Objective
+
+Expose backend assignment and receipt state to the desktop so published jobs
+can visibly progress beyond queued when protocol records exist.
+
+### Spec
+
+- Add a daemon command that reads the daemon-owned protocol store.
+- Reflect stored job assignments as assigned provider and running state.
+- Reflect receipt availability and receipt bundles as evidence/verifying state.
+- Reflect verification quorum as completed state when the required verifier
+  count is met.
+- Expose a desktop action to manually sync protocol state.
+- Keep execution itself backend-owned; desktop only observes and updates local
+  job state from protocol records.
+
+### Checklist
+
+- [x] Add daemon protocol refresh command
+- [x] Add protocol assignment/status refresh tests
+- [x] Add Tauri and TypeScript bindings
+- [x] Add desktop Sync protocol action
+- [x] Verify daemon tests, clippy, frontend build, and native bundle
+- [ ] Commit and push
+
+### Review
+
+- Added `RefreshProtocolJobs` to the daemon IPC protocol.
+- `refresh_protocol_jobs` now reads local protocol assignments, receipt
+  availability, bundles, and verification receipts.
+- Desktop jobs update to `matching`, `running`, `verifying`, or `completed`
+  based on actual protocol records.
+- Added Tauri/TypeScript bindings and a top-bar `Sync protocol` action.
+- Verification passed:
+  - `cargo test -p osciris-daemon refresh_protocol_jobs_reflects_assignment --locked`
+  - `cargo test -p osciris-daemon --locked`
+  - `cargo clippy -p osciris-daemon --locked --all-targets -- -D warnings`
+  - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop tauri build`
+
+## Desktop Protocol Publication Bridge
+
+### Objective
+
+Expose the first real backend protocol flow through the desktop daemon: a
+desktop job can move beyond local funding review into a signed local protocol
+announcement that provider matching can consume.
+
+### Spec
+
+- Keep the desktop non-custodial: no EVM private keys or seed phrases enter the
+  UI or daemon.
+- Generate and persist a daemon-local Ed25519 protocol identity for signing
+  job announcements.
+- Convert desktop training/inference jobs into `osciris-core` `JobSpec` and
+  signed `JobAnnouncement` records.
+- Store protocol announcements in the daemon-owned local `ProtocolStore`.
+- Expose a Tauri/Desktop action that publishes a funding-review job into the
+  protocol queue.
+- Do not claim provider execution is desktop-driven until assignment,
+  execution, and receipt ingestion are all exposed through daemon APIs.
+
+### Checklist
+
+- [x] Add daemon protocol-store and signing dependencies
+- [x] Add daemon-local protocol identity persistence
+- [x] Convert desktop jobs into signed protocol announcements
+- [x] Add daemon and Tauri `publish_job` command path
+- [x] Add desktop UI action for funding-review jobs
+- [x] Verify daemon tests, desktop build, and native Tauri bundle
+- [ ] Commit and push
+
+### Review
+
+- Added a daemon-local Ed25519 identity stored under the daemon state directory
+  as `protocol-ed25519-seed`.
+- Added `publish_job`, which records a signed `JobAnnouncement` in the daemon's
+  local `ProtocolStore` and advances the desktop job to `queued`.
+- Added Tauri and TypeScript bindings for `publish_job`.
+- Updated the desktop detail view so draft jobs move to funding review, then
+  funding-review jobs can publish a protocol announcement.
+- Verified:
+  - `cargo test -p osciris-daemon publish_job_records_protocol_announcement --locked`
+  - `cargo test -p osciris-daemon --locked`
+  - `cargo clippy -p osciris-daemon --locked --all-targets -- -D warnings`
+  - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop tauri build`
+
+## Real Receipt Ingestion
+
+### Objective
+
+Make fetched or discovered provider evidence durable as real local receipt
+state, not just downloaded files plus bundle metadata. Existing commands verify
+receipt availability signatures and bundle hashes, but they do not record the
+execution receipt itself after fetching evidence.
+
+### Spec
+
+- Reuse existing signed `ReceiptAvailability` and evidence directory format.
+- Validate execution receipt metadata, file hash, bundle metadata, recomputed
+  bundle hash, and provider signature.
+- After validation, record both the execution receipt and receipt bundle in the
+  protocol store.
+- Update existing fetch/verify-discovered commands to use the ingestion helper.
+- Keep remote HTTP/S3 bundle ingestion out of scope until transfer support is
+  implemented.
+
+### Checklist
+
+- [x] Add reusable evidence ingestion helper
+- [x] Record execution receipt during local bundle fetch
+- [x] Record execution receipt before discovered-receipt verification
+- [x] Add tests proving fetched evidence updates durable job state
+- [ ] Verify and push
+
+### Review
+
+- Added `ingest_fetched_evidence`, which validates job spec, execution receipt,
+  bundle, and provider signature, then records job state, execution receipt,
+  and receipt bundle in the local protocol store.
+- Updated `network fetch-receipt-bundle` and `network verify-discovered-receipt`
+  to call the ingestion helper before reporting success.
+- Added a regression test proving fetched evidence updates durable job state in
+  a fresh consumer store.
+- Verification passed:
+  - `cargo test -p osciris-cli ingested_fetched_evidence --locked`
+  - `cargo fmt --check`
+  - `cargo clippy -p osciris-cli --locked --all-targets -- -D warnings`
+  - `cargo test -p osciris-cli --locked`
+  - `cargo test --workspace --locked`
+
+## Provider Matching and Execution Protocol Slice
+
+### Objective
+
+Add the missing backend assignment step between provider claims and provider
+execution. The protocol already supports signed job announcements, provider
+capabilities, provider claims, signed assignments, and auto-provider execution
+of assigned jobs. The gap is deterministic assignment from stored signed
+claims/capabilities without manual provider selection.
+
+### Spec
+
+- Add a CLI/backend command that loads one announced job and all stored claims
+  for that job.
+- Verify the job announcement signature against the submitter public key.
+- For each claim, require a stored provider capability, matching provider public
+  key, valid provider capability signature, valid claim signature, online/idle
+  or online/busy provider status, and capability fit.
+- Select the best provider deterministically by lowest current load, lowest
+  active job count, earliest claim timestamp, then provider node ID.
+- Sign and persist a `JobAssignment` with the assigner key.
+- Preserve the existing auto-provider execution boundary: providers still
+  execute only assignments signed by a configured trusted assigner.
+- Do not add desktop UI until this backend surface is proven.
+
+### Checklist
+
+- [x] Add deterministic provider selection helpers
+- [x] Add `network auto-assign-job` CLI command
+- [x] Add unit coverage for selection and signature validation
+- [x] Verify targeted node/CLI tests
+- [ ] Update review notes and push
+
+### Review
+
+- Added `osciris-node network auto-assign-job` to select a provider from stored
+  signed claims and persist a signed assignment.
+- The selector verifies the job announcement signature, provider claim
+  signature, provider capability signature, public-key consistency, provider
+  online status, and capability fit before assignment.
+- Deterministic ranking is lowest current load, lowest active job count,
+  earliest claim timestamp, then provider node ID.
+- Existing assignments are returned idempotently instead of being replaced.
+- The existing auto-provider execution path remains unchanged: providers still
+  execute only assignments signed by a configured trusted assigner.
+- Added tests for lowest-load valid claimant selection and tampered-claim
+  rejection.
+- Verification passed:
+  - `cargo test -p osciris-cli auto_assign --locked`
+  - `cargo test -p osciris-node job_matching --locked`
+  - `cargo fmt --check`
+  - `cargo clippy -p osciris-cli --locked --all-targets -- -D warnings`
+  - `cargo test -p osciris-cli --locked`
+  - `cargo test -p osciris-node --locked`
+  - `cargo test --workspace --locked` (74 passed, 1 ignored live-RPC test)
+
+## Desktop OSCIRIS Branding
+
+### Objective
+
+Replace the default or mismatched desktop branding with the existing OSCIRIS
+mark already present in the workspace, both for packaged app icons and in-app
+navigation branding.
+
+### Spec
+
+- Use the canonical `apps/desktop/src-tauri/icons/osciris.svg` mark.
+- Configure Tauri packaging to use the existing generated icon set instead of
+  relying on implicit defaults.
+- Replace the simplified in-app hex/leaf glyph with the same OSCIRIS
+  three-sweep mark.
+- Verify frontend and native desktop builds after the branding change.
+
+### Checklist
+
+- [x] Add explicit Tauri bundle icon configuration
+- [x] Replace the in-app custom mark with the canonical OSCIRIS mark
+- [x] Build/test the desktop app
+- [ ] Commit and push the branding update
+
+### Review
+
+- Tauri packaging now explicitly uses the existing desktop icon set, including
+  `icon.icns`, `icon.ico`, `icon.png`, and standard PNG sizes.
+- The in-app sidebar brand mark now uses the same three-sweep OSCIRIS vector
+  shape as `apps/desktop/src-tauri/icons/osciris.svg`.
+- Verified the generated macOS bundle declares `CFBundleIconFile => icon.icns`
+  and includes `Contents/Resources/icon.icns`.
+- Desktop verification passed:
+  - `pnpm --dir apps/desktop build`
+  - `pnpm --dir apps/desktop tauri build`
+
+## Protocol Settlement and Execution Backlog
+
+### Objective
+
+Continue from the desktop workspace PR by turning the next protocol gaps into
+real, verifiable backend behavior: ERC-20 job escrow, provider
+matching/execution, and receipt ingestion. Start with the smallest protocol
+slice that removes a known code-level blocker without overstating deployed
+contract capability.
+
+### Spec
+
+- Keep native-token escrow behavior unchanged.
+- Allow configured ERC-20 payment tokens to be passed to the deployed escrow
+  contract without attaching native value.
+- Validate that an existing on-chain escrow matches the requested amount,
+  verifier count, and payment token before treating creation as idempotent.
+- Keep transaction journaling, signer locking, and replay-safe resume behavior.
+- Do not invent token allowance, custody, or final settlement semantics that are
+  not exposed by the current escrow ABI.
+- Treat provider matching/execution and receipt ingestion as follow-on slices
+  after escrow creation no longer rejects ERC-20 payment tokens.
+
+### Checklist
+
+- [x] Remove the hard ERC-20 escrow rejection in `osciris-chain`
+- [x] Add payment-token validation for idempotent existing escrow checks
+- [x] Ensure native escrow attaches value and ERC-20 escrow attaches zero value
+- [x] Add targeted tests for native/ERC-20 escrow preparation logic
+- [x] Update protocol documentation and review notes
+- [x] Run targeted chain tests and broader workspace verification
+
+### Review
+
+- `osciris-chain` no longer rejects nonzero configured payment-token addresses
+  before escrow creation.
+- Native-token escrow creation still attaches the escrow amount as transaction
+  value.
+- ERC-20-token escrow creation passes the configured payment token to the
+  escrow contract and attaches zero native value.
+- Existing escrow idempotency now validates the payment token as well as amount
+  and verifier count before returning `already_created`.
+- The desktop product docs now distinguish chain-client ERC-20 support from
+  deployed contract, allowance, and verified-token requirements.
+- Targeted chain verification passed: `cargo test -p osciris-chain --locked`
+  (15 tests).
+- Formatting and strict lint verification passed: `cargo fmt --check` and
+  `cargo clippy -p osciris-chain --locked --all-targets -- -D warnings`.
+- Full Rust workspace verification passed: `cargo test --workspace --locked`
+  (72 passed, 1 ignored live-RPC test).
+
+## Investor-Ready Compute Workspace
+
+### Objective
+
+Turn OSCIRIS Node Desktop into a holistic buyer and operator workspace that
+communicates the complete product: create training and inference jobs, track
+their lifecycle, inspect results and verification evidence, and manage the
+testnet treasury boundary without inventing network activity or taking custody
+of private keys.
+
+### Product Surface
+
+- Overview: spend, active jobs, verified completions, node/network readiness.
+- Jobs: training and inference filters with draft, funding, queue, execution,
+  verification, completed, and failed states.
+- New job: model, workload, privacy mode, hardware profile, verifier quorum,
+  budget, and challenge-window inputs.
+- Job detail: timeline, economics, provider assignment, artifacts, execution
+  receipt, verifier result, and chain anchor.
+- Wallet: watch-only Horizen testnet address, native/test-token balances,
+  deposit coordinates, committed funds, spend history, and withdrawal
+  preparation for external signing.
+- Evidence: receipt and anchor surfaces derived only from daemon records.
+
+### Trust Boundary
+
+- Persist job drafts and wallet configuration in the per-user daemon state.
+- Keep private keys and seed phrases outside OSCIRIS Desktop.
+- Read balances over the official Horizen testnet RPC.
+- Label configurable ERC-20 balances as test tokens, never official testnet
+  USDC.
+- Do not enable funded job submission or ERC-20 withdrawal while protocol
+  escrow rejects non-native payment tokens.
+- Allow externally signed transaction preparation only after a settlement-token
+  contract is explicitly configured.
+
+### Checklist
+
+- [x] Add daemon job, evidence, wallet, and transaction-preparation types
+- [x] Add versioned IPC commands and atomic persistence
+- [x] Add Horizen testnet balance reads and fail-closed address validation
+- [x] Add Overview, Jobs, Job Detail, Evidence, and Wallet navigation
+- [x] Add training and inference job creation flows
+- [x] Add lifecycle, economics, receipt, and verifier components
+- [x] Add watch-only deposit and external-signing withdrawal flows
+- [x] Add responsive investor-demo visual states and honest empty states
+- [x] Add daemon, bridge, and frontend tests
+- [x] Update architecture, security, and product-boundary documentation
+- [x] Run full cross-platform-quality verification
+
+### Review
+
+- Added persisted training and inference drafts with privacy, hardware, quorum,
+  challenge-window, and stable-value budget controls.
+- Added an explicit draft-to-funding-review transition. Later lifecycle states
+  remain protocol-owned and cannot be fabricated by Desktop.
+- Added Overview, Compute Jobs, Job Detail, Evidence, Wallet, and Local Node
+  product surfaces with pending, running, completed, and failed filtering.
+- Added watch-only Horizen testnet wallet configuration, official RPC chain-ID
+  validation, native balance reads, configurable test-token reads, deposit
+  coordinates, committed-budget reporting, and unsigned ERC-20 transfer
+  preparation.
+- Private keys and seed phrases remain outside Desktop. Zero addresses are
+  rejected and withdrawal preparation remains disabled until a nonzero
+  test-token contract is configured.
+- Added an explicit stablecoin boundary: Horizen documents mainnet USDC but no
+  official Horizen-testnet USDC contract, so the UI uses `USDC_TEST` and does
+  not present it as Circle-issued USDC.
+- Native smoke testing passed in an isolated state directory:
+  - bundled sidecar started from the `.app`
+  - inference draft persisted
+  - funding-review transition persisted
+  - Horizen RPC balance synchronized
+  - committed budget updated to match the submitted job
+- Verification passed:
+  - 70 workspace tests passed; one live-RPC test remains ignored by default
+  - live Horizen RPC test passed separately
+  - strict Clippy passed for protocol and Tauri workspaces
+  - production frontend build passed without compatibility warnings
+  - production dependency audit found no known vulnerabilities
+  - macOS arm64 `.app` bundled GUI, daemon, `LICENSE`, and `NOTICE`
+  - responsive `860x620` review found no horizontal overflow
+
+## Cross-Platform OSCIRIS Node Desktop Foundation
+
+### Objective
+
+Create the first real desktop vertical slice for macOS, Windows, and Linux:
+a versioned per-user daemon API plus a Tauri GUI that starts the daemon, reads
+real process state, and pauses or resumes participation without duplicating
+protocol logic in the frontend.
+
+### Architecture
+
+- Add `osciris-daemon` as the long-running local owner of node state.
+- Use a per-user Unix socket on macOS/Linux and named pipe on Windows.
+- Use bounded, newline-framed JSON with an explicit API version.
+- Keep signing material and filesystem access out of the webview.
+- Let the Tauri Rust layer expose only typed daemon operations.
+- Keep the frontend local-only with a restrictive CSP and no remote content.
+- Treat the desktop app as a controller; closing its window must not define
+  network participation state.
+
+### Desktop MVP
+
+- Node status: daemon version, uptime, participation mode, and network state.
+- Controls: launch daemon, retry connection, pause, and resume.
+- Honest pending states for identity, hardware, model profiles, jobs, receipts,
+  and readiness until their APIs are implemented.
+- Light technical visual system using OSCIRIS cyan, warm white surfaces,
+  hairline borders, restrained motion, and mono status metadata.
+
+### Checklist
+
+- [x] Add versioned daemon request/response types
+- [x] Add secure cross-platform per-user IPC server and client
+- [x] Persist participation mode atomically
+- [x] Add daemon protocol and transport tests
+- [x] Scaffold Tauri 2, React, TypeScript, and Vite desktop app
+- [x] Connect launch, status, pause, and resume controls
+- [x] Add responsive desktop dashboard and offline/error states
+- [x] Bundle the target-native daemon with the desktop app
+- [x] Add desktop architecture and development documentation
+- [x] Add macOS, Linux, and Windows desktop CI
+- [x] Verify Rust workspace tests, frontend build, and native macOS bundle
+- [x] Review security boundaries and changed-file scope
+
+### Review
+
+- Added `osciris-daemon` with API v1, bounded newline-framed JSON, request IDs,
+  constant-time credential checks, and fail-closed participation defaults.
+- Added mode `0600` Unix sockets under mode `0700` per-user state directories
+  and local-only Windows named pipes.
+- Persisted participation state atomically and kept identity, hardware,
+  network, jobs, receipts, and readiness explicitly pending until measured APIs
+  exist.
+- Added a Tauri 2 desktop controller with only typed status, launch, pause, and
+  resume commands. React has no shell, filesystem, network, or secret access.
+- Added host-target sidecar preparation. Native packages embed the daemon,
+  Apache-2.0 `LICENSE`, and `NOTICE`.
+- Added a three-platform desktop workflow for daemon tests, frontend builds,
+  sidecar preparation, and Tauri bridge compilation.
+- Verification passed:
+  - `cargo test --workspace --locked`: 67 tests passed
+  - strict Clippy for the protocol workspace and Tauri workspace
+  - production frontend build: 199.13 kB JavaScript, 62.65 kB gzip
+  - `pnpm audit --prod`: no known vulnerabilities
+  - macOS arm64 `.app` build with both native executables
+  - packaged daemon reports `osciris-daemon 0.1.2`
+  - packaged `LICENSE` and `NOTICE` match repository files byte-for-byte
+  - responsive check at `860x620`: no horizontal overflow or browser errors
+
 ## Provider-Local Inference Round-Trip Milestone
 
 ### Objective
@@ -17,7 +1031,7 @@ central inference server.
 - [x] Separate currently working commands from commands that must be implemented
 - [x] Define observable quorum and capacity-gap acceptance criteria
 - [x] Link the runbook from README and milestone documentation
-- [ ] Create the GitHub milestone and scoped implementation issues
+- [x] Create the GitHub milestone and scoped implementation issues
 - [x] Verify links, command references, changed-file scope, and repository tests
 
 ### Review

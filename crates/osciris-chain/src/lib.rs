@@ -602,9 +602,6 @@ impl OscirisChain {
             .config
             .payment_token
             .ok_or_else(|| anyhow!("payment_token is not configured in chain config"))?;
-        if !payment_token.is_zero() {
-            bail!("ERC-20 escrow is not implemented; configure zero-address native payment token");
-        }
         let amount = U256::from_str(&job_spec.escrow_amount_atomic).with_context(|| {
             format!(
                 "invalid escrow_amount_atomic {}",
@@ -624,6 +621,9 @@ impl OscirisChain {
         })
         .await?;
         if existing.status != 0 {
+            if existing.paymentToken != payment_token {
+                bail!("job escrow already exists with a different payment token");
+            }
             if existing.amount != amount {
                 bail!("job escrow already exists with a different amount");
             }
@@ -655,9 +655,13 @@ impl OscirisChain {
                     label: "job escrow creation",
                 },
                 || async {
-                    self.sign_prepared_call(call.value(amount), signer.clone(), client_address)
-                        .await
-                        .context("failed to pre-sign job escrow creation")
+                    self.sign_prepared_call(
+                        call.value(escrow_native_value(payment_token, amount)),
+                        signer.clone(),
+                        client_address,
+                    )
+                    .await
+                    .context("failed to pre-sign job escrow creation")
                 },
             )
             .await?;
@@ -1167,6 +1171,14 @@ fn gas_with_buffer(estimate: u64) -> u64 {
     estimate.saturating_add(buffer).max(estimate)
 }
 
+fn escrow_native_value(payment_token: Address, amount: U256) -> U256 {
+    if payment_token.is_zero() {
+        amount
+    } else {
+        U256::ZERO
+    }
+}
+
 fn hex_to_bytes(raw: &str) -> Result<Vec<u8>> {
     hex::decode(raw.trim_start_matches("0x"))
         .with_context(|| format!("invalid hex bytes {}", abbreviate_for_error(raw)))
@@ -1495,6 +1507,27 @@ mod tests {
         assert_eq!(gas_with_buffer(100), 120);
         assert_eq!(gas_with_buffer(0), 0);
         assert_eq!(gas_with_buffer(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn native_escrow_attaches_native_value() {
+        assert_eq!(
+            escrow_native_value(Address::ZERO, U256::from(1_000_000_u64)),
+            U256::from(1_000_000_u64)
+        );
+    }
+
+    #[test]
+    fn erc20_escrow_attaches_no_native_value() {
+        let token = parse_address(
+            "0x0000000000000000000000000000000000000001",
+            "payment_token",
+        )
+        .unwrap();
+        assert_eq!(
+            escrow_native_value(token, U256::from(1_000_000_u64)),
+            U256::ZERO
+        );
     }
 
     #[test]

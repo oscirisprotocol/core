@@ -249,7 +249,7 @@ fn expected_metrics_path(job_type: JobType, output_dir: &Path) -> PathBuf {
     }
 }
 
-fn collect_artifacts(
+pub(crate) fn collect_artifacts(
     evidence_dir: &Path,
     required_files: &[PathBuf],
 ) -> Result<Vec<osciris_core::ArtifactManifest>> {
@@ -281,7 +281,7 @@ fn collect_artifacts(
     Ok(manifests)
 }
 
-fn gpu_metadata_from_environment() -> GpuMetadata {
+pub(crate) fn gpu_metadata_from_environment() -> GpuMetadata {
     GpuMetadata {
         gpu_model: std::env::var("OSCIRIS_GPU_MODEL").unwrap_or_else(|_| "unknown".to_string()),
         driver: std::env::var("OSCIRIS_GPU_DRIVER").unwrap_or_else(|_| "unknown".to_string()),
@@ -294,7 +294,7 @@ fn gpu_metadata_from_environment() -> GpuMetadata {
     }
 }
 
-fn relative_to(path: &Path, base: &Path) -> Result<String> {
+pub(crate) fn relative_to(path: &Path, base: &Path) -> Result<String> {
     Ok(path
         .strip_prefix(base)
         .with_context(|| format!("{} is not under {}", path.display(), base.display()))?

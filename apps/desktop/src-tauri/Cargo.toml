@@ -1,0 +1,26 @@
+[package]
+name = "osciris-desktop"
+version = "0.1.2"
+description = "Cross-platform OSCIRIS participant node controller"
+authors = ["OSCIRIS Labs"]
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace]
+
+[lib]
+name = "osciris_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+osciris-daemon = { path = "../../../crates/osciris-daemon" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2.11.4", features = [] }
+tauri-plugin-dialog = "2.4.1"
+tauri-plugin-process = "2.3.1"
+tauri-plugin-updater = "2.10.1"
+tokio = { version = "1.52", features = ["process", "time"] }

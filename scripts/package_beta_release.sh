@@ -102,11 +102,11 @@ usage() {
   cat <<'EOF'
 Usage:
   bash scripts/package_beta_release.sh \
-    --version 0.1.1 \
+    --version 0.1.2 \
     --channel beta \
-    --release-page-url https://github.com/oscirisprotocol/core/releases/tag/v0.1.1 \
+    --release-page-url https://github.com/oscirisprotocol/core/releases/tag/v0.1.2 \
     --release-notes "Beta collaboration release" \
-    --base-download-url https://github.com/oscirisprotocol/core/releases/download/v0.1.1 \
+    --base-download-url https://github.com/oscirisprotocol/core/releases/download/v0.1.2 \
     --asset macos-aarch64=/path/to/osciris-node \
     [--asset linux-x86_64=/path/to/osciris-node] \
     [--asset windows-x86_64=/path/to/osciris-node.exe] \

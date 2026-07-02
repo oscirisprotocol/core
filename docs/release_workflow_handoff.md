@@ -1,14 +1,15 @@
 # OSCIRIS Release Workflow Handoff
 
-The release workflow is now live in this repo and has been verified on GitHub
+The release workflow is live in this repo and has been verified on GitHub
 Actions across all three beta platforms:
 
 - `macos-aarch64`
 - `linux-x86_64`
 - `windows-x86_64`
 
-The public beta release surface has also been updated and verified against
-`https://oscirislabs.com`.
+The GitHub release surface is current. The live custom domain still depends on
+external routing, so it may lag the published GitHub artifacts until that
+route is repointed.
 
 ## Current State
 
@@ -17,17 +18,14 @@ The public beta release surface has also been updated and verified against
   - PR run `28387903806` passed
   - push run `28387900403` passed
 - GitHub prerelease:
-  - tag `v0.1.0` (historical MIT-licensed release)
-  - includes:
-    - `osciris-node-macos-aarch64.tar.gz`
-    - `osciris-node-linux-x86_64.tar.gz`
-    - `osciris-node-windows-x86_64.zip`
+  - tag `v0.1.2` (current Apache-2.0 beta release)
+  - includes signed updater artifacts and the public release manifests
 - Public website manifest:
-  - `https://oscirislabs.com/beta-release-manifest.json`
-  - includes all three required platforms with matching SHA-256 hashes
+  - `https://raw.githubusercontent.com/Khokavim/oscirislabs.com/main/public/beta-release-manifest.json`
+  - points to `v0.1.2`
 - Public verifier:
   - `python3 scripts/verify_beta_release_surface.py --base-url https://oscirislabs.com`
-  - passes
+  - must be re-run after the live custom domain is repointed
 
 ## Workflow Behavior
 
@@ -51,7 +49,7 @@ When publishing or repairing a beta release manually, prefer the repo script:
 
 ```bash
 bash scripts/run_beta_release_flow.sh \
-  --version 0.1.1 \
+  --version 0.1.2 \
   --release-notes "Beta collaboration release for colleague onboarding, published bundle sync, and release checks." \
   --asset macos-aarch64=/absolute/path/to/osciris-node \
   --asset linux-x86_64=/absolute/path/to/osciris-node \
@@ -76,7 +74,7 @@ Important behavior:
 
 For a future beta refresh, confirm all of the following:
 
-- the release version is `0.1.1` or later and Cargo metadata is `Apache-2.0`
+- the release version is `0.1.2` or later and Cargo metadata is `Apache-2.0`
 - `gh release view <tag>` shows all three expected assets
 - every release archive contains its binary, `LICENSE`, and `NOTICE`
 - `python3 scripts/verify_beta_release_surface.py --base-url https://oscirislabs.com` passes

@@ -1,5 +1,11 @@
 # Lessons
 
+- Passwordless Tauri updater keys still require
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""` in non-interactive release jobs;
+  omitting the variable causes a password prompt and CI failure.
+- GitHub `/releases/latest` excludes prereleases. A desktop updater using that
+  static redirect must publish its signed update as the latest release or use a
+  different channel endpoint.
 - When a public manifest controls installer update behavior, do not publish it
   automatically unless the referenced release assets have already been verified
   as reachable and consistent.
@@ -16,3 +22,16 @@
   OSCIRIS. Each participant stores and serves the pinned model on its own
   machine; OSCIRIS coordinates discovery, assignment, receipts, verification,
   and published network status.
+- A desktop controller is not distributable when its daemon exists only in the
+  developer workspace. Bundle the target-native daemon as a fixed sidecar and
+  verify the installed artifact contains it before presenting launch controls
+  as complete.
+- For macOS Tauri builds, keep ad-hoc signing in the config for local builds
+  and let tagged release jobs optionally override it with a real
+  `APPLE_SIGNING_IDENTITY`. That lets GitHub releases stay usable before Apple
+  notarization is provisioned, while still upgrading to a notarized bundle when
+  the secrets exist.
+- Do not label a configurable Horizen testnet settlement token as official
+  USDC. Horizen publishes mainnet USDC, but the official testnet token list does
+  not include USDC; use an explicit `USDC_TEST` boundary until a test contract
+  is deployed and verified.
