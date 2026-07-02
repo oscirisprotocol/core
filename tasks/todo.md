@@ -295,16 +295,16 @@ passing PR branch.
     `crates/osciris-cli/Cargo.toml`
   - `cargo test --locked -p osciris-daemon -p osciris-node -p osciris-cli`
     now passes
-- Live publication state is behind the branch:
+- Live publication state is current on GitHub, while the live custom domain is
+  still routed externally:
   - `https://github.com/oscirisprotocol/core/releases/latest/download/latest.json`
-    returns `404`, so the desktop updater endpoint is not live
-  - `gh release view v0.1.1` shows CLI beta archives and
-    `beta-release-manifest.json`, but no desktop installer/update assets
-  - `https://oscirislabs.com/beta-release-manifest.json` still points to
-    `v0.1.0`, not `v0.1.1`
-  - `python3 scripts/verify_beta_release_surface.py --base-url https://oscirislabs.com`
-    currently fails because the public `v0.1.0` archives do not contain the
-    required `LICENSE` and `NOTICE` members
+    resolves to the published beta updater manifest
+  - `gh release view v0.1.2` shows the signed desktop installer/update assets
+    and the public release manifests
+  - `https://raw.githubusercontent.com/Khokavim/oscirislabs.com/main/public/beta-release-manifest.json`
+    points to `v0.1.2`
+  - `https://oscirislabs.com/` still serves the older Railway deployment, so
+    the custom domain is the remaining external routing blocker
 - Documentation is partially stale relative to the code:
   - `docs/milestones/provider_local_inference_roundtrip.md` has been updated to
     reflect interactive inference progress
@@ -313,10 +313,9 @@ passing PR branch.
 
 ### Release Blockers
 
-- Publication blocker: publish a new tagged release containing the desktop
-  installer and signed updater assets so `latest.json` exists.
-- Publication blocker: republish the OSCIRIS Labs beta manifest to the new
-  release after GitHub assets are live and verified.
+- External routing blocker: repoint `oscirislabs.com` so the live domain
+  serves the current GitHub-published beta surface instead of the stale
+  Railway deployment.
 - Documentation blocker: keep the desktop workflow docs aligned with the
   implemented interactive inference surface and current beta boundary.
   - `pnpm --dir apps/desktop prepare:sidecar:debug`
