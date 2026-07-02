@@ -305,6 +305,14 @@ passing PR branch.
     points to `v0.1.2`
   - `https://oscirislabs.com/` still serves the older Railway deployment, so
     the custom domain is the remaining external routing blocker
+- Fixed the macOS desktop bundle signing path for local builds and release
+  notarization:
+  - `apps/desktop/src-tauri/tauri.conf.json` keeps
+    `bundle.macOS.signingIdentity = "-"` for ad-hoc local builds
+  - the release workflow now notarizes `v*` tags when Apple secrets are
+    present, but falls back to a sealed ad-hoc bundle when they are not
+  - that preserves local buildability without Apple credentials while keeping
+    GitHub release DMGs usable before Developer ID notarization is provisioned
 - Documentation is partially stale relative to the code:
   - `docs/milestones/provider_local_inference_roundtrip.md` has been updated to
     reflect interactive inference progress

@@ -29,6 +29,27 @@ Desktop update publication is restricted to `v*` tag builds:
 Normal branch and pull-request builds do not receive the private key and do not
 produce updater artifacts.
 
+## macOS Code Signing and Notarization
+
+- Local and pull-request macOS builds stay ad-hoc signed by default, which
+  keeps developer bundle builds working without Apple credentials.
+- Tagged release builds use a temporary Developer ID Application certificate
+  and notarize the app bundle when the Apple secrets are present.
+- If the Apple signing/notarization secrets are not available yet, the tagged
+  release still falls back to a sealed ad-hoc macOS bundle so GitHub downloads
+  remain usable instead of shipping a malformed “damaged” app.
+- Required GitHub secrets for notarized macOS release builds are:
+  - `APPLE_CERTIFICATE` — base64-encoded `.p12` for the Developer ID
+    Application certificate
+  - `APPLE_CERTIFICATE_PASSWORD` — the certificate password
+  - `KEYCHAIN_PASSWORD` — password for the temporary keychain created in CI
+  - `APPLE_ID` — the Apple developer account email
+  - `APPLE_PASSWORD` — the app-specific password for notarization
+  - `APPLE_TEAM_ID` — the Apple Developer Team ID
+- These credentials are separate from the updater signing key used for
+  `latest.json`. When they are missing, the release still builds and publishes
+  an ad-hoc signed DMG; only notarization is skipped.
+
 ## Supported Update Targets
 
 | Tauri target | Release asset |

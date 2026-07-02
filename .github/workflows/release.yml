@@ -136,14 +136,49 @@ jobs:
 
       - name: Build desktop installer
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
         run: pnpm tauri build
 
-      - name: Build signed desktop updater
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+      - name: Build macOS release bundle
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && matrix.os == 'macos-14' }}
         env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-        run: pnpm tauri build --config src-tauri/tauri.updater.conf.json
+        run: |
+          set -euo pipefail
+          if [ -n "${APPLE_CERTIFICATE:-}" ] && [ -n "${APPLE_CERTIFICATE_PASSWORD:-}" ] && [ -n "${KEYCHAIN_PASSWORD:-}" ] && [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+            python3 -c 'import base64, os, pathlib; pathlib.Path("certificate.p12").write_bytes(base64.b64decode(os.environ["APPLE_CERTIFICATE"]))'
+            security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain-db
+            security list-keychains -d user -s build.keychain-db login.keychain-db
+            security default-keychain -s build.keychain-db
+            security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain-db
+            security set-keychain-settings -lut 21600 build.keychain-db
+            security import certificate.p12 -k build.keychain-db -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productbuild
+            rm -f certificate.p12
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain-db
+            SIGNING_IDENTITY="$(security find-identity -v -p codesigning build.keychain-db | awk -F'"' '/Developer ID Application/ { print $2; exit }')"
+            if [ -z "$SIGNING_IDENTITY" ]; then
+              echo "::error::Unable to resolve Developer ID Application signing identity"
+              exit 1
+            fi
+            echo "APPLE_SIGNING_IDENTITY=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
+            echo "APPLE_ID=$APPLE_ID" >> "$GITHUB_ENV"
+            echo "APPLE_PASSWORD=$APPLE_PASSWORD" >> "$GITHUB_ENV"
+            echo "APPLE_TEAM_ID=$APPLE_TEAM_ID" >> "$GITHUB_ENV"
+            echo "Using Developer ID signing identity for notarized release."
+          else
+            echo "No Apple notarization credentials provided; building an ad-hoc signed release bundle."
+            unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+          fi
+          pnpm tauri build --config src-tauri/tauri.updater.conf.json
 
       - name: Stage signed updater assets
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
