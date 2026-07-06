@@ -275,6 +275,14 @@ enum IdentityCommands {
         display_name: String,
         #[arg(long)]
         work_root: Option<PathBuf>,
+        /// Reuse an existing signing seed instead of generating a new one. Deterministically
+        /// restores the same identity/peer id, e.g. after a work-root was wiped but the seed
+        /// was kept. Mutually exclusive with --signing-key-seed-file.
+        #[arg(long, conflicts_with = "signing_key_seed_file")]
+        signing_key_seed_base64: Option<String>,
+        /// Reuse an existing signing seed read from a file (see --signing-key-seed-base64).
+        #[arg(long)]
+        signing_key_seed_file: Option<PathBuf>,
         #[arg(long)]
         evm_private_key_hex: Option<String>,
         #[arg(long = "bootstrap-peer")]
@@ -830,8 +838,19 @@ struct BetaReleaseCheckSummary {
 }
 
 fn main() -> Result<()> {
+    // Long-running commands (`network serve`, `run-provider`, `run-verifier`) print nothing
+    // until they exit, so without a default log level an operator sees a silent, seemingly
+    // hung process. Default to info-level for our own crate (plus mDNS discovery lines and
+    // connection warnings) so `serve` shows its listen addresses and peer activity out of the
+    // box; RUST_LOG still overrides this entirely when set.
+    let env_filter = match std::env::var("RUST_LOG") {
+        Ok(value) if !value.trim().is_empty() => EnvFilter::new(value),
+        _ => EnvFilter::new("warn,osciris_node=info,osciris_cli=info,libp2p_mdns=info"),
+    };
+    // Logs go to stderr so they never corrupt the JSON that data commands print to stdout.
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(env_filter)
+        .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
     let runtime = tokio::runtime::Runtime::new()?;
@@ -886,15 +905,28 @@ fn main() -> Result<()> {
                 role,
                 display_name,
                 work_root,
+                signing_key_seed_base64,
+                signing_key_seed_file,
                 evm_private_key_hex,
                 bootstrap_peers,
                 output,
             } => {
+                let existing_seed = if signing_key_seed_base64.is_some()
+                    || signing_key_seed_file.is_some()
+                {
+                    Some(load_signing_seed_from_source(
+                        signing_key_seed_base64,
+                        signing_key_seed_file,
+                    )?)
+                } else {
+                    None
+                };
                 let generated = runtime.block_on(generate_identity(
                     node_id,
                     role,
                     display_name,
                     work_root,
+                    existing_seed,
                     evm_private_key_hex,
                     bootstrap_peers,
                 ))?;
@@ -2884,6 +2916,7 @@ async fn run_contributor_gpu_peer_demo(
         "Enterprise 1".to_string(),
         Some(identity_root.join("enterprise")),
         None,
+        None,
         vec![],
     )
     .await?;
@@ -2893,6 +2926,7 @@ async fn run_contributor_gpu_peer_demo(
         "Provider A".to_string(),
         Some(identity_root.join("provider-a")),
         None,
+        None,
         vec![],
     )
     .await?;
@@ -2901,6 +2935,7 @@ async fn run_contributor_gpu_peer_demo(
         "verifier".to_string(),
         "Verifier 1".to_string(),
         Some(identity_root.join("verifier-1")),
+        None,
         None,
         vec![],
     )
@@ -2973,13 +3008,21 @@ async fn generate_identity(
     role: String,
     display_name: String,
     work_root: Option<PathBuf>,
+    existing_seed_base64: Option<String>,
     evm_private_key_hex: Option<String>,
     bootstrap_peers: Vec<String>,
 ) -> Result<GeneratedIdentity> {
     let role = parse_node_role(&role)?;
-    let mut seed_bytes = [0_u8; 32];
-    OsRng.fill_bytes(&mut seed_bytes);
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
+    // Reuse a caller-supplied seed when given (deterministically restoring the same identity,
+    // e.g. after a work-root was wiped); otherwise mint a fresh random seed.
+    let signing_key = match existing_seed_base64 {
+        Some(seed) => load_signing_key_from_base64_seed(seed.trim())?,
+        None => {
+            let mut seed_bytes = [0_u8; 32];
+            OsRng.fill_bytes(&mut seed_bytes);
+            ed25519_dalek::SigningKey::from_bytes(&seed_bytes)
+        }
+    };
     let signing_key_seed_base64 = BASE64.encode(signing_key.to_bytes());
     let ed25519_public_key_base64 = verifying_key_to_base64(&signing_key.verifying_key());
     let peer_id = peer_id_from_signing_seed(&signing_key_seed_base64)?;
@@ -3885,6 +3928,7 @@ mod tests {
                 "provider".to_string(),
                 "Provider A".to_string(),
                 Some(work_root.clone()),
+                None,
                 None,
                 vec!["/ip4/127.0.0.1/tcp/4101".to_string()],
             ))

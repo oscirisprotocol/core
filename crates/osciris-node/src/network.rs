@@ -18,6 +18,10 @@ use libp2p::gossipsub::{
 };
 use libp2p::identify::{Behaviour as Identify, Config as IdentifyConfig, Event as IdentifyEvent};
 use libp2p::identity;
+use libp2p::kad::store::MemoryStore;
+use libp2p::kad::{Behaviour as Kademlia, Config as KademliaConfig, Mode as KademliaMode};
+use libp2p::mdns::tokio::Behaviour as Mdns;
+use libp2p::mdns::{Config as MdnsConfig, Event as MdnsEvent};
 use libp2p::multiaddr::Protocol;
 use libp2p::ping::{Behaviour as Ping, Config as PingConfig, Event as PingEvent};
 use libp2p::request_response::{
@@ -65,12 +69,16 @@ pub struct NetworkServeConfig {
     pub run_for: Option<Duration>,
 }
 
+const KADEMLIA_PROTOCOL: &str = "/osciris/kad/0.1.0";
+
 #[derive(NetworkBehaviour)]
 struct OscirisBehaviour {
     gossipsub: Gossipsub,
     bundle_transfer: RequestResponse<BundleTransferCodec>,
     identify: Identify,
     ping: Ping,
+    mdns: Mdns,
+    kademlia: Kademlia<MemoryStore>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -318,14 +326,29 @@ fn build_network_swarm(
         )],
         RequestResponseConfig::default().with_request_timeout(Duration::from_secs(30)),
     );
+    let local_peer_id = keypair.public().to_peer_id();
+    let mdns = Mdns::new(MdnsConfig::default(), local_peer_id)?;
+
+    let mut kademlia_config = KademliaConfig::new(StreamProtocol::new(KADEMLIA_PROTOCOL));
+    kademlia_config.set_query_timeout(Duration::from_secs(60));
+    let mut kademlia = Kademlia::with_config(
+        local_peer_id,
+        MemoryStore::new(local_peer_id),
+        kademlia_config,
+    );
+    // Announce ourselves as a full DHT node so peers we reach can route back to us.
+    kademlia.set_mode(Some(KademliaMode::Server));
+
     let behaviour = OscirisBehaviour {
         gossipsub,
         bundle_transfer,
-        identify: Identify::new(IdentifyConfig::new(
-            "/osciris/0.1.0".to_string(),
-            keypair.public(),
-        )),
+        identify: Identify::new(
+            IdentifyConfig::new("/osciris/0.1.0".to_string(), keypair.public())
+                .with_push_listen_addr_updates(true),
+        ),
         ping: Ping::new(PingConfig::new()),
+        mdns,
+        kademlia,
     };
     Ok(SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
@@ -357,6 +380,8 @@ pub async fn serve_presence(config: &NetworkServeConfig) -> Result<NetworkServeS
     let listen_addr: Multiaddr = config.listen_addr.parse()?;
     let listen_addr_string = listen_addr.to_string();
     swarm.listen_on(listen_addr.clone())?;
+    let local_peer_id = *swarm.local_peer_id();
+    info!("local peer id: {local_peer_id}");
     let bootstrap_addrs = config
         .bootstrap_peers
         .iter()
@@ -365,6 +390,7 @@ pub async fn serve_presence(config: &NetworkServeConfig) -> Result<NetworkServeS
     for addr in &bootstrap_addrs {
         dial_bootstrap(&mut swarm, addr);
     }
+    bootstrap_kademlia(&mut swarm);
 
     let mut interval = tokio::time::interval(config.presence_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -450,12 +476,14 @@ pub async fn serve_presence(config: &NetworkServeConfig) -> Result<NetworkServeS
                     for addr in &bootstrap_addrs {
                         dial_bootstrap(&mut swarm, addr);
                     }
+                    bootstrap_kademlia(&mut swarm);
                 }
             }
             event = swarm.select_next_some() => {
                 match event {
                     SwarmEvent::NewListenAddr { address, .. } => {
                         info!("listening on {address}");
+                        info!("bootstrap address (share with peers): {address}/p2p/{local_peer_id}");
                     }
                     SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                         connected_peers.insert(peer_id);
@@ -632,6 +660,10 @@ pub async fn serve_presence(config: &NetworkServeConfig) -> Result<NetworkServeS
                     }
                     SwarmEvent::Behaviour(OscirisBehaviourEvent::Identify(IdentifyEvent::Received { peer_id, info, .. })) => {
                         info!("identified peer {peer_id} on {:?}", info.listen_addrs);
+                        register_identified_peer(&mut swarm, peer_id, info);
+                    }
+                    SwarmEvent::Behaviour(OscirisBehaviourEvent::Mdns(event)) => {
+                        handle_mdns_event(&mut swarm, event);
                     }
                     SwarmEvent::Behaviour(OscirisBehaviourEvent::Ping(PingEvent { peer, result, .. })) => {
                         if result.is_err() {
@@ -689,6 +721,8 @@ pub async fn run_auto_provider(config: &AutoProviderConfig) -> Result<AutoProvid
     let listen_addr: Multiaddr = config.listen_addr.parse()?;
     let listen_addr_string = listen_addr.to_string();
     swarm.listen_on(listen_addr.clone())?;
+    let local_peer_id = *swarm.local_peer_id();
+    info!("local peer id: {local_peer_id}");
     let bootstrap_addrs = config
         .bootstrap_peers
         .iter()
@@ -697,6 +731,7 @@ pub async fn run_auto_provider(config: &AutoProviderConfig) -> Result<AutoProvid
     for addr in &bootstrap_addrs {
         dial_bootstrap(&mut swarm, addr);
     }
+    bootstrap_kademlia(&mut swarm);
 
     let local_presence = LocalPresenceContext {
         identity: &identity,
@@ -796,12 +831,14 @@ pub async fn run_auto_provider(config: &AutoProviderConfig) -> Result<AutoProvid
                     for addr in &bootstrap_addrs {
                         dial_bootstrap(&mut swarm, addr);
                     }
+                    bootstrap_kademlia(&mut swarm);
                 }
             }
             event = swarm.select_next_some() => {
                 match event {
                     SwarmEvent::NewListenAddr { address, .. } => {
                         info!("auto provider listening on {address}");
+                        info!("bootstrap address (share with peers): {address}/p2p/{local_peer_id}");
                     }
                     SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                         connected_peers.insert(peer_id);
@@ -1046,6 +1083,10 @@ pub async fn run_auto_provider(config: &AutoProviderConfig) -> Result<AutoProvid
                     }
                     SwarmEvent::Behaviour(OscirisBehaviourEvent::Identify(IdentifyEvent::Received { peer_id, info, .. })) => {
                         info!("auto provider identified peer {peer_id} on {:?}", info.listen_addrs);
+                        register_identified_peer(&mut swarm, peer_id, info);
+                    }
+                    SwarmEvent::Behaviour(OscirisBehaviourEvent::Mdns(event)) => {
+                        handle_mdns_event(&mut swarm, event);
                     }
                     SwarmEvent::Behaviour(OscirisBehaviourEvent::Ping(PingEvent { peer, result, .. })) => {
                         if result.is_err() {
@@ -1099,6 +1140,7 @@ pub async fn fetch_receipt_bundle_p2p(config: &BundleFetchConfig) -> Result<Fetc
         }
         dial_bootstrap(&mut swarm, addr);
     }
+    bootstrap_kademlia(&mut swarm);
 
     let end_at = tokio::time::Instant::now() + config.timeout;
     let mut pending_request_id: Option<OutboundRequestId> = None;
@@ -1136,6 +1178,12 @@ pub async fn fetch_receipt_bundle_p2p(config: &BundleFetchConfig) -> Result<Fetc
                             RequestResponseEvent::ResponseSent { .. } => {}
                         }
                     }
+                    SwarmEvent::Behaviour(OscirisBehaviourEvent::Mdns(event)) => {
+                        handle_mdns_event(&mut swarm, event);
+                    }
+                    SwarmEvent::Behaviour(OscirisBehaviourEvent::Identify(IdentifyEvent::Received { peer_id, info, .. })) => {
+                        register_identified_peer(&mut swarm, peer_id, info);
+                    }
                     SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                         info!("outgoing connection retry to {:?} did not complete: {error}", peer_id);
                     }
@@ -1164,6 +1212,7 @@ pub async fn auto_fetch_receipts(config: &AutoVerifierConfig) -> Result<AutoVeri
     for addr in &bootstrap_addrs {
         dial_bootstrap(&mut swarm, addr);
     }
+    bootstrap_kademlia(&mut swarm);
 
     let end_at = tokio::time::Instant::now() + config.run_for;
     let mut interval = tokio::time::interval(config.presence_interval);
@@ -1301,6 +1350,12 @@ pub async fn auto_fetch_receipts(config: &AutoVerifierConfig) -> Result<AutoVeri
                             RequestResponseEvent::ResponseSent { .. } => {}
                         }
                     }
+                    SwarmEvent::Behaviour(OscirisBehaviourEvent::Mdns(event)) => {
+                        handle_mdns_event(&mut swarm, event);
+                    }
+                    SwarmEvent::Behaviour(OscirisBehaviourEvent::Identify(IdentifyEvent::Received { peer_id, info, .. })) => {
+                        register_identified_peer(&mut swarm, peer_id, info);
+                    }
                     SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                         info!("outgoing connection retry to {:?} did not complete: {error}", peer_id);
                     }
@@ -1324,9 +1379,139 @@ pub async fn auto_fetch_receipts(config: &AutoVerifierConfig) -> Result<AutoVeri
 }
 
 fn dial_bootstrap(swarm: &mut libp2p::Swarm<OscirisBehaviour>, addr: &Multiaddr) {
+    // Seed the Kademlia routing table with any bootstrap peer whose multiaddr carries a
+    // peer id, so DHT discovery can fan out from these entry points.
+    if let Some(peer_id) = peer_id_from_multiaddr(addr) {
+        let routable = strip_p2p_suffix(addr);
+        swarm
+            .behaviour_mut()
+            .kademlia
+            .add_address(&peer_id, routable);
+        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+    }
     if let Err(error) = swarm.dial(addr.clone()) {
         warn!("failed to dial bootstrap {addr}: {error}");
     }
+}
+
+/// Kick off a Kademlia bootstrap query so the local node discovers peers beyond the
+/// directly configured bootstrap set. A failure here is non-fatal (e.g. empty routing
+/// table when no bootstrap peers were supplied) and only relevant for wide-area discovery.
+fn bootstrap_kademlia(swarm: &mut libp2p::Swarm<OscirisBehaviour>) {
+    if let Err(error) = swarm.behaviour_mut().kademlia.bootstrap() {
+        info!("kademlia bootstrap not started yet: {error}");
+    }
+}
+
+/// Register a peer discovered out-of-band (mDNS, Identify, etc.) with the pieces of the
+/// stack that need its address: the Kademlia routing table, the swarm's per-peer address
+/// book, and gossipsub's explicit peer set. Then dial it so a connection is established
+/// even if the peer never dials us first.
+fn register_discovered_peer(
+    swarm: &mut libp2p::Swarm<OscirisBehaviour>,
+    peer_id: PeerId,
+    addr: Multiaddr,
+) {
+    if peer_id == *swarm.local_peer_id() {
+        return;
+    }
+    let routable = strip_p2p_suffix(&addr);
+    swarm
+        .behaviour_mut()
+        .kademlia
+        .add_address(&peer_id, routable.clone());
+    swarm.add_peer_address(peer_id, routable);
+    swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+    // Symmetric discovery (both peers learn each other at once) would otherwise trigger two
+    // simultaneous mutual dials, which collide during the Noise handshake. Break the tie by
+    // peer id so exactly one side initiates; the other side accepts the inbound connection.
+    if should_initiate_dial(swarm.local_peer_id(), &peer_id) {
+        if let Err(error) = swarm.dial(peer_id) {
+            // A DialError::DialPeerConditionFalse just means we are already connected/dialing.
+            info!("dial to discovered peer {peer_id} not started: {error}");
+        }
+    }
+}
+
+/// Tie-break for symmetric peer discovery: the peer with the smaller id dials, the other
+/// waits for the inbound connection. Comparing the byte representation gives both sides a
+/// consistent, opposite answer.
+fn should_initiate_dial(local: &PeerId, remote: &PeerId) -> bool {
+    local.to_bytes() < remote.to_bytes()
+}
+
+/// Handle an mDNS event: newly discovered LAN peers are registered and dialed; expired
+/// entries are dropped from the Kademlia routing table.
+fn handle_mdns_event(swarm: &mut libp2p::Swarm<OscirisBehaviour>, event: MdnsEvent) {
+    match event {
+        MdnsEvent::Discovered(peers) => {
+            for (peer_id, addr) in peers {
+                info!("mdns discovered peer {peer_id} at {addr}");
+                register_discovered_peer(swarm, peer_id, addr);
+            }
+        }
+        MdnsEvent::Expired(peers) => {
+            for (peer_id, addr) in peers {
+                info!("mdns entry expired for peer {peer_id} at {addr}");
+                swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .remove_address(&peer_id, &strip_p2p_suffix(&addr));
+            }
+        }
+    }
+}
+
+/// Feed the addresses learned from an Identify exchange into Kademlia and gossipsub so
+/// wide-area peers (learned via the DHT rather than mDNS) become routable and part of the
+/// pubsub mesh. The peer's `observed_addr` is the address *they* saw us dial from, i.e. our
+/// own public/NAT-mapped address; registering it as an external address lets our Kademlia
+/// server advertise a reachable address so other internet peers can route back to us.
+fn register_identified_peer(
+    swarm: &mut libp2p::Swarm<OscirisBehaviour>,
+    peer_id: PeerId,
+    info: libp2p::identify::Info,
+) {
+    swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+    for addr in info.listen_addrs {
+        let routable = strip_p2p_suffix(&addr);
+        swarm
+            .behaviour_mut()
+            .kademlia
+            .add_address(&peer_id, routable.clone());
+        swarm.add_peer_address(peer_id, routable);
+    }
+    if is_publicly_routable(&info.observed_addr) {
+        swarm.add_external_address(strip_p2p_suffix(&info.observed_addr));
+    }
+}
+
+/// A crude filter that keeps only globally routable IPv4/IPv6 addresses, so we do not
+/// advertise loopback or private-LAN addresses as our external address on the DHT.
+fn is_publicly_routable(addr: &Multiaddr) -> bool {
+    for protocol in addr.iter() {
+        match protocol {
+            Protocol::Ip4(ip) => {
+                return !ip.is_loopback()
+                    && !ip.is_private()
+                    && !ip.is_link_local()
+                    && !ip.is_unspecified()
+            }
+            Protocol::Ip6(ip) => return !ip.is_loopback() && !ip.is_unspecified(),
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Remove a trailing `/p2p/<peer-id>` component from a multiaddr. Kademlia and the swarm
+/// address book expect the transport address without the peer id suffix.
+fn strip_p2p_suffix(addr: &Multiaddr) -> Multiaddr {
+    let mut cleaned = addr.clone();
+    if matches!(cleaned.iter().last(), Some(Protocol::P2p(_))) {
+        cleaned.pop();
+    }
+    cleaned
 }
 
 fn peer_id_from_multiaddr(addr: &Multiaddr) -> Option<PeerId> {
