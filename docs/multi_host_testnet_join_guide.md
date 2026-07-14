@@ -227,6 +227,39 @@ Every other node simply uses the relay as its `--bootstrap-peer`:
   --bootstrap-peer /ip4/203.0.113.7/tcp/4101/p2p/<relay-peer-id>
 ```
 
+### Publishing the relay under a domain name
+
+Hard-coding a bare IP means every node's config breaks when you replace the box.
+Instead point a hostname at the relay (`A` record, e.g.
+`relay.oscirislabs.com -> 203.0.113.7`) and use a `/dns4/` multiaddr:
+
+```bash
+  --bootstrap-peer /dns4/relay.oscirislabs.com/tcp/4101/p2p/<relay-peer-id>
+```
+
+Run the relay itself with the hostname as its external address, so the addresses
+it hands out in circuit reservations are also stable:
+
+```bash
+osciris-node network serve \
+  --work-root ~/.osciris/relay \
+  --signing-key-seed-file /run/osciris/relay.seed \
+  --listen-addr /ip4/0.0.0.0/tcp/4101 \
+  --relay-server \
+  --external-address /dns4/relay.oscirislabs.com/tcp/4101
+```
+
+The `peer_id` is still required and is **not** replaced by DNS: the hostname says
+*where* to connect, the peer id proves *who* answered. Keep the relay's seed safe
+— it is what preserves the peer id across host rebuilds. If you lose the seed,
+every node's `--bootstrap-peer` must be updated with the new peer id, so back it
+up and restore it with the recovery flow in section 1a.
+
+Use `/dns6/` for AAAA records. `/dnsaddr/` is also supported, which resolves
+`TXT` records at `_dnsaddr.<host>` containing full multiaddrs — useful later for
+publishing a rotating set of seed nodes under one name without changing client
+config.
+
 A NAT'd node detects it is not publicly reachable, reserves a `/p2p-circuit`
 slot on the relay, and logs:
 

@@ -30,8 +30,9 @@ use osciris_core::{
     VerificationReceipt, VerificationReceiptAnnouncement,
 };
 use osciris_node::network::{
-    auto_fetch_receipts, fetch_receipt_bundle_p2p, peer_id_from_signing_seed, run_auto_provider,
-    serve_presence, AutoProviderConfig, AutoVerifierConfig, BundleFetchConfig, NetworkServeConfig,
+    auto_fetch_receipts, fetch_receipt_bundle_p2p, peer_id_from_signing_seed, resolve_bootstrap_peers,
+    run_auto_provider, serve_presence, AutoProviderConfig, AutoVerifierConfig, BundleFetchConfig,
+    NetworkServeConfig,
 };
 use osciris_node::status::{
     build_provider_network_status, calculate_quorum_status, calculate_settlement_status,
@@ -343,6 +344,10 @@ enum NetworkCommands {
         /// A relay server must know its external address or its reservations are unusable.
         #[arg(long = "external-address")]
         external_addresses: Vec<String>,
+        /// Do not dial the built-in OSCIRIS seed nodes. Use for isolated/offline networks, and
+        /// on the seed node itself.
+        #[arg(long, default_value_t = false)]
+        no_default_bootstrap: bool,
         #[arg(long, default_value_t = 5)]
         presence_interval_seconds: u64,
         #[arg(long)]
@@ -687,6 +692,9 @@ enum NetworkCommands {
         listen_addr: String,
         #[arg(long = "bootstrap-peer")]
         bootstrap_peers: Vec<String>,
+        /// Do not dial the built-in OSCIRIS seed nodes.
+        #[arg(long, default_value_t = false)]
+        no_default_bootstrap: bool,
         #[arg(long, default_value_t = 5)]
         presence_interval_seconds: u64,
         #[arg(long, default_value_t = 30)]
@@ -711,6 +719,9 @@ enum NetworkCommands {
         listen_addr: String,
         #[arg(long = "bootstrap-peer")]
         bootstrap_peers: Vec<String>,
+        /// Do not dial the built-in OSCIRIS seed nodes.
+        #[arg(long, default_value_t = false)]
+        no_default_bootstrap: bool,
         #[arg(long, default_value_t = 5)]
         presence_interval_seconds: u64,
         #[arg(long, default_value_t = 60)]
@@ -1288,11 +1299,15 @@ fn main() -> Result<()> {
                 bootstrap_peers,
                 relay_server,
                 external_addresses,
+                no_default_bootstrap,
                 presence_interval_seconds,
                 run_seconds,
             } => {
                 let signing_key_seed_base64 =
                     load_signing_seed_from_source(signing_key_seed_base64, signing_key_seed_file)?;
+                // A relay is itself a seed node, so it must not bootstrap to its own /dnsaddr.
+                let bootstrap_peers =
+                    resolve_bootstrap_peers(&bootstrap_peers, !no_default_bootstrap && !relay_server);
                 let summary = runtime.block_on(serve_presence(&NetworkServeConfig {
                     protocol_root: work_root.join(".osciris"),
                     signing_key_seed_base64,
@@ -2061,12 +2076,14 @@ fn main() -> Result<()> {
                 signing_key_id,
                 listen_addr,
                 bootstrap_peers,
+                no_default_bootstrap,
                 presence_interval_seconds,
                 run_seconds,
                 announce_seconds,
             } => {
                 let signing_key_seed_base64 =
                     load_signing_seed_from_source(signing_key_seed_base64, signing_key_seed_file)?;
+                let bootstrap_peers = resolve_bootstrap_peers(&bootstrap_peers, !no_default_bootstrap);
                 let summary = runtime.block_on(auto_fetch_receipts(&AutoVerifierConfig {
                     protocol_root: work_root.join(".osciris"),
                     signing_key_seed_base64: signing_key_seed_base64.clone(),
@@ -2132,11 +2149,13 @@ fn main() -> Result<()> {
                 trusted_assigner_public_keys_base64,
                 listen_addr,
                 bootstrap_peers,
+                no_default_bootstrap,
                 presence_interval_seconds,
                 run_seconds,
             } => {
                 let signing_key_seed_base64 =
                     load_signing_seed_from_source(signing_key_seed_base64, signing_key_seed_file)?;
+                let bootstrap_peers = resolve_bootstrap_peers(&bootstrap_peers, !no_default_bootstrap);
                 let summary = runtime.block_on(run_auto_provider(&AutoProviderConfig {
                     protocol_root: work_root.join(".osciris"),
                     signing_key_seed_base64,

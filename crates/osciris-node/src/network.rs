@@ -85,6 +85,29 @@ const KADEMLIA_PROTOCOL: &str = "/osciris/kad/0.1.0";
 /// Advertised by relay servers. A peer offering this can host circuit reservations for us.
 const RELAY_HOP_PROTOCOL: &str = "/libp2p/circuit/relay/0.2.0/hop";
 
+/// Seed nodes every node dials on startup unless told otherwise, so a fresh install joins the
+/// network with no flags.
+///
+/// These are `/dnsaddr` entries on purpose. A `/dnsaddr` resolves the TXT records at
+/// `_dnsaddr.<host>` into full multiaddrs that already carry the peer id, so the peer id does
+/// not have to be compiled in. That means the seed nodes can be rebuilt, moved, or scaled out
+/// by editing DNS alone — no client ever changes its configuration.
+pub const DEFAULT_BOOTSTRAP_PEERS: &[&str] = &["/dnsaddr/relay.oscirislabs.com"];
+
+/// Combine operator-supplied bootstrap peers with the built-in seed nodes. Explicit peers are
+/// kept first so they are dialed before the defaults.
+pub fn resolve_bootstrap_peers(configured: &[String], use_defaults: bool) -> Vec<String> {
+    let mut peers: Vec<String> = configured.to_vec();
+    if use_defaults {
+        for default in DEFAULT_BOOTSTRAP_PEERS {
+            if !peers.iter().any(|peer| peer == default) {
+                peers.push((*default).to_string());
+            }
+        }
+    }
+    peers
+}
+
 #[derive(NetworkBehaviour)]
 struct OscirisBehaviour {
     gossipsub: Gossipsub,
@@ -383,6 +406,10 @@ fn build_network_swarm(
         )?
         // QUIC runs over UDP, where hole punching succeeds far more often than over TCP.
         .with_quic()
+        // Resolves `/dns4`, `/dns6` and `/dnsaddr` multiaddrs, so a bootstrap or relay node can
+        // be published under a stable hostname instead of a bare IP that changes when the box is
+        // replaced.
+        .with_dns()?
         // Adds the `/p2p-circuit` transport so we can dial (and be dialed) through a relay.
         .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
         .with_behaviour(|_, relay_client| OscirisBehaviour {
@@ -547,9 +574,16 @@ pub async fn serve_presence(config: &NetworkServeConfig) -> Result<NetworkServeS
                         connected_peer_count += 1;
                         info!("connection established with {peer_id}");
                     }
-                    SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                    SwarmEvent::ConnectionClosed { peer_id, num_established, .. } => {
                         connected_peers.remove(&peer_id);
                         info!("connection closed with {peer_id}");
+                        // Losing the connection to a relay drops our circuit reservation with it.
+                        // Forget it once the last connection is gone so that, when we reconnect
+                        // and identify again, we request a fresh reservation instead of assuming
+                        // the old one still stands and silently becoming undialable.
+                        if num_established == 0 {
+                            relay_reservations.remove(&peer_id);
+                        }
                     }
                     SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                         info!("outgoing connection retry to {:?} did not complete: {error}", peer_id);
@@ -1458,6 +1492,10 @@ fn dial_bootstrap(swarm: &mut libp2p::Swarm<OscirisBehaviour>, addr: &Multiaddr)
     // Seed the Kademlia routing table with any bootstrap peer whose multiaddr carries a
     // peer id, so DHT discovery can fan out from these entry points.
     if let Some(peer_id) = peer_id_from_multiaddr(addr) {
+        // A seed node resolves its own /dnsaddr entry to itself; don't dial ourselves.
+        if peer_id == *swarm.local_peer_id() {
+            return;
+        }
         let routable = strip_p2p_suffix(addr);
         swarm
             .behaviour_mut()
