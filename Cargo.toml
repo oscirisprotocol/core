@@ -25,7 +25,7 @@ ed25519-dalek = "2.1"
 flate2 = "1.0"
 futures = "0.3"
 hex = "0.4"
-libp2p = { version = "0.55", features = ["dns", "gossipsub", "identify", "kad", "macros", "mdns", "noise", "ping", "request-response", "tcp", "tokio", "yamux"] }
+libp2p = { version = "0.55", features = ["autonat", "dcutr", "dns", "gossipsub", "identify", "kad", "macros", "mdns", "noise", "ping", "quic", "relay", "request-response", "tcp", "tokio", "yamux"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rand = "0.8"
 semver = "1.0"

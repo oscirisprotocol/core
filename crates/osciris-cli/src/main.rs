@@ -333,6 +333,16 @@ enum NetworkCommands {
         listen_addr: String,
         #[arg(long = "bootstrap-peer")]
         bootstrap_peers: Vec<String>,
+        /// Act as a circuit relay for NAT'd peers. Enable this only on a publicly reachable
+        /// node (VPS or port-forwarded host); NAT'd peers reserve a circuit here and then
+        /// hole-punch to each other via DCUtR.
+        #[arg(long, default_value_t = false)]
+        relay_server: bool,
+        /// Multiaddr to advertise as ours, e.g. /ip4/203.0.113.7/tcp/4101. Needed when the
+        /// public address is not visible on a local interface (AWS elastic IP and similar).
+        /// A relay server must know its external address or its reservations are unusable.
+        #[arg(long = "external-address")]
+        external_addresses: Vec<String>,
         #[arg(long, default_value_t = 5)]
         presence_interval_seconds: u64,
         #[arg(long)]
@@ -1276,6 +1286,8 @@ fn main() -> Result<()> {
                 signing_key_seed_file,
                 listen_addr,
                 bootstrap_peers,
+                relay_server,
+                external_addresses,
                 presence_interval_seconds,
                 run_seconds,
             } => {
@@ -1286,6 +1298,8 @@ fn main() -> Result<()> {
                     signing_key_seed_base64,
                     listen_addr,
                     bootstrap_peers,
+                    relay_server,
+                    external_addresses,
                     status: osciris_core::NodeStatus::OnlineIdle,
                     current_load: 0.0,
                     active_job_count: 0,
@@ -2093,6 +2107,8 @@ fn main() -> Result<()> {
                         signing_key_seed_base64,
                         listen_addr,
                         bootstrap_peers,
+                        relay_server: false,
+                        external_addresses: Vec::new(),
                         status: osciris_core::NodeStatus::OnlineIdle,
                         current_load: 0.0,
                         active_job_count: 0,

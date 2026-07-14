@@ -16,6 +16,8 @@ use libp2p::gossipsub::{
     self, Behaviour as Gossipsub, Event as GossipsubEvent, IdentTopic, MessageAuthenticity,
     PublishError,
 };
+use libp2p::autonat;
+use libp2p::dcutr;
 use libp2p::identify::{Behaviour as Identify, Config as IdentifyConfig, Event as IdentifyEvent};
 use libp2p::identity;
 use libp2p::kad::store::MemoryStore;
@@ -24,11 +26,14 @@ use libp2p::mdns::tokio::Behaviour as Mdns;
 use libp2p::mdns::{Config as MdnsConfig, Event as MdnsEvent};
 use libp2p::multiaddr::Protocol;
 use libp2p::ping::{Behaviour as Ping, Config as PingConfig, Event as PingEvent};
+use libp2p::relay;
 use libp2p::request_response::{
     Behaviour as RequestResponse, Codec as RequestResponseCodec, Config as RequestResponseConfig,
     Event as RequestResponseEvent, Message as RequestResponseMessage, OutboundRequestId,
     ProtocolSupport,
 };
+use libp2p::swarm::behaviour::toggle::Toggle;
+use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, StreamProtocol, SwarmBuilder};
 use osciris_core::{
@@ -42,7 +47,7 @@ use osciris_core::{
     VerificationReceipt, VerificationReceiptAnnouncement,
 };
 use tar::{Archive, Builder};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::store::ProtocolStore;
 use crate::{run_job, ProviderConfig};
@@ -62,6 +67,13 @@ pub struct NetworkServeConfig {
     pub signing_key_seed_base64: String,
     pub listen_addr: String,
     pub bootstrap_peers: Vec<String>,
+    /// Host `/p2p-circuit` reservations for NAT'd peers. Only meaningful on a node that is
+    /// itself publicly reachable (a VPS or port-forwarded host).
+    pub relay_server: bool,
+    /// Addresses to advertise as ours. Required when the public address is not one the host can
+    /// see on a local interface (e.g. an AWS elastic IP NATed onto a private ENI). A relay must
+    /// know its external address or its reservations carry no addresses and are useless.
+    pub external_addresses: Vec<String>,
     pub status: NodeStatus,
     pub current_load: f64,
     pub active_job_count: u32,
@@ -70,6 +82,8 @@ pub struct NetworkServeConfig {
 }
 
 const KADEMLIA_PROTOCOL: &str = "/osciris/kad/0.1.0";
+/// Advertised by relay servers. A peer offering this can host circuit reservations for us.
+const RELAY_HOP_PROTOCOL: &str = "/libp2p/circuit/relay/0.2.0/hop";
 
 #[derive(NetworkBehaviour)]
 struct OscirisBehaviour {
@@ -79,6 +93,15 @@ struct OscirisBehaviour {
     ping: Ping,
     mdns: Mdns,
     kademlia: Kademlia<MemoryStore>,
+    /// Lets a NAT'd node reserve a slot on a relay and be reached over `/p2p-circuit`.
+    relay_client: relay::client::Behaviour,
+    /// Only enabled on publicly reachable nodes (`--relay-server`), which then host circuits
+    /// for NAT'd peers.
+    relay_server: Toggle<relay::Behaviour>,
+    /// Upgrades a relayed connection into a direct one via simultaneous-open hole punching.
+    dcutr: dcutr::Behaviour,
+    /// Tells us whether we are publicly reachable, so we only pay for a relay when we need one.
+    autonat: autonat::Behaviour,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -299,6 +322,7 @@ pub fn peer_id_from_signing_seed(seed_base64: &str) -> Result<String> {
 
 fn build_network_swarm(
     signing_key: &ed25519_dalek::SigningKey,
+    relay_server: bool,
 ) -> Result<libp2p::Swarm<OscirisBehaviour>> {
     let keypair = identity::Keypair::ed25519_from_bytes(signing_key.to_bytes())
         .map_err(anyhow::Error::new)?;
@@ -339,17 +363,17 @@ fn build_network_swarm(
     // Announce ourselves as a full DHT node so peers we reach can route back to us.
     kademlia.set_mode(Some(KademliaMode::Server));
 
-    let behaviour = OscirisBehaviour {
-        gossipsub,
-        bundle_transfer,
-        identify: Identify::new(
-            IdentifyConfig::new("/osciris/0.1.0".to_string(), keypair.public())
-                .with_push_listen_addr_updates(true),
-        ),
-        ping: Ping::new(PingConfig::new()),
-        mdns,
-        kademlia,
-    };
+    let identify = Identify::new(
+        IdentifyConfig::new("/osciris/0.1.0".to_string(), keypair.public())
+            .with_push_listen_addr_updates(true),
+    );
+    let ping = Ping::new(PingConfig::new());
+    let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
+    let dcutr = dcutr::Behaviour::new(local_peer_id);
+    let relay_server = Toggle::from(
+        relay_server.then(|| relay::Behaviour::new(local_peer_id, relay::Config::default())),
+    );
+
     Ok(SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
         .with_tcp(
@@ -357,7 +381,22 @@ fn build_network_swarm(
             libp2p::noise::Config::new,
             libp2p::yamux::Config::default,
         )?
-        .with_behaviour(|_| behaviour)?
+        // QUIC runs over UDP, where hole punching succeeds far more often than over TCP.
+        .with_quic()
+        // Adds the `/p2p-circuit` transport so we can dial (and be dialed) through a relay.
+        .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
+        .with_behaviour(|_, relay_client| OscirisBehaviour {
+            gossipsub,
+            bundle_transfer,
+            identify,
+            ping,
+            mdns,
+            kademlia,
+            relay_client,
+            relay_server,
+            dcutr,
+            autonat,
+        })?
         .build())
 }
 
@@ -368,7 +407,7 @@ pub async fn serve_presence(config: &NetworkServeConfig) -> Result<NetworkServeS
         .await?
         .context("local node identity not found; run `osciris-node node join` first")?;
     let signing_key = load_signing_key_from_base64_seed(&config.signing_key_seed_base64)?;
-    let mut swarm = build_network_swarm(&signing_key)?;
+    let mut swarm = build_network_swarm(&signing_key, config.relay_server)?;
     let topic = IdentTopic::new(PRESENCE_TOPIC);
     let capability_topic = IdentTopic::new(CAPABILITY_TOPIC);
     let job_announcement_topic = IdentTopic::new(JOB_ANNOUNCEMENT_TOPIC);
@@ -379,9 +418,14 @@ pub async fn serve_presence(config: &NetworkServeConfig) -> Result<NetworkServeS
 
     let listen_addr: Multiaddr = config.listen_addr.parse()?;
     let listen_addr_string = listen_addr.to_string();
-    swarm.listen_on(listen_addr.clone())?;
+    listen_on_transports(&mut swarm, &listen_addr)?;
     let local_peer_id = *swarm.local_peer_id();
     info!("local peer id: {local_peer_id}");
+    for external in &config.external_addresses {
+        let addr: Multiaddr = external.parse()?;
+        info!("advertising external address {addr}");
+        swarm.add_external_address(addr);
+    }
     let bootstrap_addrs = config
         .bootstrap_peers
         .iter()
@@ -408,6 +452,7 @@ pub async fn serve_presence(config: &NetworkServeConfig) -> Result<NetworkServeS
     let mut received_verification_receipt_count = 0u32;
     let mut connected_peer_count = 0u32;
     let mut connected_peers = BTreeSet::new();
+    let mut relay_reservations: BTreeSet<PeerId> = BTreeSet::new();
     let local_presence = LocalPresenceContext {
         identity: &identity,
         signing_key: &signing_key,
@@ -484,6 +529,18 @@ pub async fn serve_presence(config: &NetworkServeConfig) -> Result<NetworkServeS
                     SwarmEvent::NewListenAddr { address, .. } => {
                         info!("listening on {address}");
                         info!("bootstrap address (share with peers): {address}/p2p/{local_peer_id}");
+                        // A relay hands its own external addresses to clients in the reservation
+                        // response; with none, clients get `NoAddressesInReservation` and the
+                        // circuit is useless. Confirm our real (non-loopback) listen addresses so
+                        // a relay on a host that can see its own public IP works with no extra
+                        // flags. Hosts whose public IP is NATed onto a private interface (AWS &
+                        // friends) still need an explicit --external-address.
+                        if config.relay_server
+                            && !is_loopback_addr(&address)
+                            && !is_circuit_addr(&address)
+                        {
+                            swarm.add_external_address(address.clone());
+                        }
                     }
                     SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                         connected_peers.insert(peer_id);
@@ -660,10 +717,29 @@ pub async fn serve_presence(config: &NetworkServeConfig) -> Result<NetworkServeS
                     }
                     SwarmEvent::Behaviour(OscirisBehaviourEvent::Identify(IdentifyEvent::Received { peer_id, info, .. })) => {
                         info!("identified peer {peer_id} on {:?}", info.listen_addrs);
+                        reserve_relay_circuit_if_needed(&mut swarm, peer_id, &info, &mut relay_reservations);
                         register_identified_peer(&mut swarm, peer_id, info);
                     }
                     SwarmEvent::Behaviour(OscirisBehaviourEvent::Mdns(event)) => {
                         handle_mdns_event(&mut swarm, event);
+                    }
+                    SwarmEvent::Behaviour(OscirisBehaviourEvent::RelayClient(event)) => {
+                        handle_relay_client_event(event);
+                    }
+                    SwarmEvent::Behaviour(OscirisBehaviourEvent::RelayServer(event)) => {
+                        info!("relay server event: {event:?}");
+                    }
+                    SwarmEvent::ListenerError { error, .. } => {
+                        warn!("listener error: {error}");
+                    }
+                    SwarmEvent::ListenerClosed { addresses, reason, .. } => {
+                        warn!("listener closed for {addresses:?}: {reason:?}");
+                    }
+                    SwarmEvent::Behaviour(OscirisBehaviourEvent::Dcutr(event)) => {
+                        handle_dcutr_event(event);
+                    }
+                    SwarmEvent::Behaviour(OscirisBehaviourEvent::Autonat(event)) => {
+                        handle_autonat_event(event);
                     }
                     SwarmEvent::Behaviour(OscirisBehaviourEvent::Ping(PingEvent { peer, result, .. })) => {
                         if result.is_err() {
@@ -711,7 +787,7 @@ pub async fn run_auto_provider(config: &AutoProviderConfig) -> Result<AutoProvid
         })?;
     let signing_key = load_signing_key_from_base64_seed(&config.signing_key_seed_base64)?;
     let trusted_assigners = trusted_assigners(config)?;
-    let mut swarm = build_network_swarm(&signing_key)?;
+    let mut swarm = build_network_swarm(&signing_key, false)?;
     let topic = IdentTopic::new(PRESENCE_TOPIC);
     let capability_topic = IdentTopic::new(CAPABILITY_TOPIC);
     let job_claim_topic = IdentTopic::new(JOB_CLAIM_TOPIC);
@@ -720,7 +796,7 @@ pub async fn run_auto_provider(config: &AutoProviderConfig) -> Result<AutoProvid
 
     let listen_addr: Multiaddr = config.listen_addr.parse()?;
     let listen_addr_string = listen_addr.to_string();
-    swarm.listen_on(listen_addr.clone())?;
+    listen_on_transports(&mut swarm, &listen_addr)?;
     let local_peer_id = *swarm.local_peer_id();
     info!("local peer id: {local_peer_id}");
     let bootstrap_addrs = config
@@ -1125,9 +1201,9 @@ pub async fn fetch_receipt_bundle_p2p(config: &BundleFetchConfig) -> Result<Fetc
         })?;
     verify_receipt_availability(&availability)?;
     let signing_key = load_signing_key_from_base64_seed(&config.signing_key_seed_base64)?;
-    let mut swarm = build_network_swarm(&signing_key)?;
+    let mut swarm = build_network_swarm(&signing_key, false)?;
     let listen_addr: Multiaddr = config.listen_addr.parse()?;
-    swarm.listen_on(listen_addr)?;
+    listen_on_transports(&mut swarm, &listen_addr)?;
     let target_peer: PeerId = config.provider_peer_id.parse()?;
     let bootstrap_addrs = config
         .bootstrap_peers
@@ -1201,9 +1277,9 @@ pub async fn auto_fetch_receipts(config: &AutoVerifierConfig) -> Result<AutoVeri
         .await?
         .context("local node identity not found; run `osciris-node node join` first")?;
     let signing_key = load_signing_key_from_base64_seed(&config.signing_key_seed_base64)?;
-    let mut swarm = build_network_swarm(&signing_key)?;
+    let mut swarm = build_network_swarm(&signing_key, false)?;
     let listen_addr: Multiaddr = config.listen_addr.parse()?;
-    swarm.listen_on(listen_addr)?;
+    listen_on_transports(&mut swarm, &listen_addr)?;
     let bootstrap_addrs = config
         .bootstrap_peers
         .iter()
@@ -1386,12 +1462,40 @@ fn dial_bootstrap(swarm: &mut libp2p::Swarm<OscirisBehaviour>, addr: &Multiaddr)
         swarm
             .behaviour_mut()
             .kademlia
-            .add_address(&peer_id, routable);
+            .add_address(&peer_id, routable.clone());
+        swarm.add_peer_address(peer_id, routable);
         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+        if swarm.is_connected(&peer_id) {
+            return;
+        }
+        // Dial by peer id (not raw address) so the swarm's PeerCondition::Disconnected check
+        // applies and we don't stack redundant duplicate connections to a peer we already
+        // reached via another path, e.g. mDNS.
+        if let Err(error) = swarm.dial(dial_opts_for_peer(peer_id)) {
+            info!("dial to bootstrap peer {peer_id} not started: {error}");
+        }
+        return;
     }
-    if let Err(error) = swarm.dial(addr.clone()) {
+    // No peer id in the multiaddr: fall back to dialing the bare address.
+    if let Err(error) = swarm.dial(dial_opts_for_addr(addr.clone())) {
         warn!("failed to dial bootstrap {addr}: {error}");
     }
+}
+
+/// Dial using a freshly allocated source port instead of libp2p's default best-effort reuse
+/// of the listening port. Reusing the listen port means a dial that hangs in SYN_SENT against
+/// an unreachable peer keeps that port pinned, and the next retry fails to rebind it with
+/// `EADDRINUSE` rather than with the real error. A new ephemeral port per dial keeps retries
+/// independent and the listener unaffected.
+fn dial_opts_for_addr(addr: Multiaddr) -> DialOpts {
+    DialOpts::unknown_peer_id()
+        .address(addr)
+        .allocate_new_port()
+        .build()
+}
+
+fn dial_opts_for_peer(peer_id: PeerId) -> DialOpts {
+    DialOpts::peer_id(peer_id).allocate_new_port().build()
 }
 
 /// Kick off a Kademlia bootstrap query so the local node discovers peers beyond the
@@ -1399,7 +1503,9 @@ fn dial_bootstrap(swarm: &mut libp2p::Swarm<OscirisBehaviour>, addr: &Multiaddr)
 /// table when no bootstrap peers were supplied) and only relevant for wide-area discovery.
 fn bootstrap_kademlia(swarm: &mut libp2p::Swarm<OscirisBehaviour>) {
     if let Err(error) = swarm.behaviour_mut().kademlia.bootstrap() {
-        info!("kademlia bootstrap not started yet: {error}");
+        // Expected and uninteresting while the routing table is still empty (e.g. a node with
+        // no bootstrap peers yet); this retries every tick, so keep it out of the default logs.
+        debug!("kademlia bootstrap not started yet: {error}");
     }
 }
 
@@ -1426,7 +1532,7 @@ fn register_discovered_peer(
     // simultaneous mutual dials, which collide during the Noise handshake. Break the tie by
     // peer id so exactly one side initiates; the other side accepts the inbound connection.
     if should_initiate_dial(swarm.local_peer_id(), &peer_id) {
-        if let Err(error) = swarm.dial(peer_id) {
+        if let Err(error) = swarm.dial(dial_opts_for_peer(peer_id)) {
             // A DialError::DialPeerConditionFalse just means we are already connected/dialing.
             info!("dial to discovered peer {peer_id} not started: {error}");
         }
@@ -1504,6 +1610,138 @@ fn is_publicly_routable(addr: &Multiaddr) -> bool {
     false
 }
 
+/// Derive a QUIC listen address from a TCP one (same IP and port, over UDP). Listening on both
+/// gives DCUtR a UDP path, where hole punching succeeds far more often than over TCP.
+fn quic_addr_from_tcp(addr: &Multiaddr) -> Option<Multiaddr> {
+    let mut quic = Multiaddr::empty();
+    let mut converted = false;
+    for protocol in addr.iter() {
+        match protocol {
+            Protocol::Tcp(port) => {
+                quic.push(Protocol::Udp(port));
+                quic.push(Protocol::QuicV1);
+                converted = true;
+            }
+            other => quic.push(other),
+        }
+    }
+    converted.then_some(quic)
+}
+
+/// Listen on the configured address plus its QUIC equivalent. Returns an error only if the
+/// primary (TCP) listen fails; a QUIC bind failure is non-fatal since TCP still works.
+fn listen_on_transports(
+    swarm: &mut libp2p::Swarm<OscirisBehaviour>,
+    listen_addr: &Multiaddr,
+) -> Result<()> {
+    swarm.listen_on(listen_addr.clone())?;
+    if let Some(quic) = quic_addr_from_tcp(listen_addr) {
+        if let Err(error) = swarm.listen_on(quic.clone()) {
+            warn!("failed to listen on quic address {quic}: {error}");
+        }
+    }
+    Ok(())
+}
+
+/// If a peer we just identified runs a relay server and we are not publicly reachable, reserve
+/// a `/p2p-circuit` slot on it. The reservation makes us dialable at
+/// `<relay-addr>/p2p-circuit/p2p/<our-peer-id>`, which is what lets other NAT'd peers reach us;
+/// DCUtR then tries to upgrade that relayed link into a direct connection.
+fn reserve_relay_circuit_if_needed(
+    swarm: &mut libp2p::Swarm<OscirisBehaviour>,
+    peer_id: PeerId,
+    info: &libp2p::identify::Info,
+    relay_reservations: &mut BTreeSet<PeerId>,
+) {
+    if swarm.behaviour().autonat.nat_status().is_public() {
+        return;
+    }
+    let offers_relay = info
+        .protocols
+        .iter()
+        .any(|protocol| protocol.as_ref() == RELAY_HOP_PROTOCOL);
+    if !offers_relay || !relay_reservations.insert(peer_id) {
+        return;
+    }
+
+    // Reserve on a concrete address of the relay, not on a circuit address it may have told us
+    // about, otherwise we would try to relay through a relay.
+    let Some(relay_addr) = info
+        .listen_addrs
+        .iter()
+        .find(|addr| is_publicly_routable(addr) && !is_circuit_addr(addr))
+        .or_else(|| {
+            info.listen_addrs
+                .iter()
+                .find(|addr| !is_circuit_addr(addr) && !is_loopback_addr(addr))
+        })
+    else {
+        relay_reservations.remove(&peer_id);
+        return;
+    };
+
+    let circuit_addr = relay_addr
+        .clone()
+        .with(Protocol::P2p(peer_id))
+        .with(Protocol::P2pCircuit);
+    match swarm.listen_on(circuit_addr.clone()) {
+        Ok(_) => info!("requesting relay reservation on {peer_id} via {circuit_addr}"),
+        Err(error) => {
+            warn!("failed to request relay reservation on {peer_id}: {error}");
+            relay_reservations.remove(&peer_id);
+        }
+    }
+}
+
+/// Relay reservation lifecycle. A successful reservation is what makes a NAT'd node reachable.
+fn handle_relay_client_event(event: relay::client::Event) {
+    match event {
+        relay::client::Event::ReservationReqAccepted { relay_peer_id, .. } => {
+            info!("relay reservation accepted by {relay_peer_id}; now reachable over /p2p-circuit");
+        }
+        relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
+            info!("outbound relayed circuit established via {relay_peer_id}");
+        }
+        relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
+            info!("inbound relayed circuit established from {src_peer_id}");
+        }
+    }
+}
+
+/// Hole-punch outcome. Success means the relayed connection was upgraded to a direct one and
+/// traffic no longer flows through the relay.
+fn handle_dcutr_event(event: dcutr::Event) {
+    match event.result {
+        Ok(_) => info!("dcutr hole punch succeeded with {}: direct connection established", event.remote_peer_id),
+        Err(error) => {
+            info!(
+                "dcutr hole punch with {} failed ({error}); staying on the relayed circuit",
+                event.remote_peer_id
+            );
+        }
+    }
+}
+
+/// Reachability probes. Going `Private` is the signal that we need a relay to be dialable.
+fn handle_autonat_event(event: autonat::Event) {
+    if let autonat::Event::StatusChanged { old, new } = event {
+        info!("autonat reachability changed: {old:?} -> {new:?}");
+    }
+}
+
+fn is_circuit_addr(addr: &Multiaddr) -> bool {
+    addr.iter()
+        .any(|protocol| matches!(protocol, Protocol::P2pCircuit))
+}
+
+fn is_loopback_addr(addr: &Multiaddr) -> bool {
+    addr.iter().any(|protocol| match protocol {
+        Protocol::Ip4(ip) => ip.is_loopback(),
+        Protocol::Ip6(ip) => ip.is_loopback(),
+        _ => false,
+    })
+}
+
 /// Remove a trailing `/p2p/<peer-id>` component from a multiaddr. Kademlia and the swarm
 /// address book expect the transport address without the peer id suffix.
 fn strip_p2p_suffix(addr: &Multiaddr) -> Multiaddr {
@@ -1514,12 +1752,16 @@ fn strip_p2p_suffix(addr: &Multiaddr) -> Multiaddr {
     cleaned
 }
 
+/// The peer a multiaddr ultimately addresses. Takes the *last* `/p2p/` component: a circuit
+/// address `/ip4/../p2p/<relay>/p2p-circuit/p2p/<target>` names the relay first and the target
+/// last, and it is the target we want. For a plain address there is only one, so this is the
+/// same answer.
 fn peer_id_from_multiaddr(addr: &Multiaddr) -> Option<PeerId> {
-    addr.iter().find_map(|protocol| {
+    addr.iter().fold(None, |found, protocol| {
         if let Protocol::P2p(peer_id) = protocol {
             Some(peer_id)
         } else {
-            None
+            found
         }
     })
 }
