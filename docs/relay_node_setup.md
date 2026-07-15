@@ -158,7 +158,7 @@ Wants=network-online.target
 Type=simple
 User=osciris
 Environment=RUST_LOG=warn,osciris_node=info
-ExecStart=/home/osciris/.cargo/bin/osciris-node network serve \
+ExecStart=/usr/local/bin/osciris-node network serve \
   --work-root /var/lib/osciris/relay \
   --signing-key-seed-file /etc/osciris/relay.seed \
   --listen-addr /ip4/0.0.0.0/tcp/4101 \
@@ -179,6 +179,8 @@ WantedBy=multi-user.target
 ```bash
 sudo useradd -r -s /usr/sbin/nologin osciris
 sudo install -d -o osciris -g osciris /var/lib/osciris/relay
+sudo install -m 755 ~/.cargo/bin/osciris-node /usr/local/bin/osciris-node
+sudo chown -R osciris:osciris /etc/osciris   # let the service user read the seed
 sudo systemctl daemon-reload
 sudo systemctl enable --now osciris-relay
 sudo journalctl -u osciris-relay -f
